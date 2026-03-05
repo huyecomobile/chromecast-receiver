@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>EcoMirror Tốc Độ Cao</title>
+  <!-- Nạp thư viện điều khiển Chromecast -->
+  <script type="text/javascript" src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <!-- Nạp thư viện hút luồng .ts siêu tốc độ (mpegts.js) -->
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
+  
+  <style>
+    /* Làm nền full đen, video che kín màn hình Tivi */
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
+    video { width: 100%; height: 100%; object-fit: contain; }
+  </style>
+</head>
+<body>
+  <video id="tvPlayer" autoplay></video>
+  
+  <script>
+    const context = cast.framework.CastReceiverContext.getInstance();
+    const playerManager = context.getPlayerManager();
+    let mpegtsPlayer = null;
+
+    // Lắng nghe khi điện thoại Android gửi link http://ip:8082/stream.ts qua
+    playerManager.setMessageInterceptor(
+      cast.framework.messages.MessageType.LOAD,
+      request => {
+        const streamUrl = request.media.contentId; // Chính là link stream của ta
+        
+        // Cắm vòi mpegts.js vào để giải mã luồng raw
+        if (mpegts.getFeatureList().mseLivePlayback) {
+            const videoElement = document.getElementById('tvPlayer');
+            
+            // Xoá luồng cũ nếu có
+            if (mpegtsPlayer) { mpegtsPlayer.destroy(); }
+
+            // Khởi tạo luồng siêu tốc
+            mpegtsPlayer = mpegts.createPlayer({
+                type: 'mse', 
+                isLive: true,
+                url: streamUrl,
+                cors: true // Cực kỳ quan trọng để lách lỗi chặn domain
+            }, {
+                // ÉP TRÌNH PHÁT BỎ TRÁNH ĐỆM (LOW-LATENCY CHÌA KHÓA Ở ĐÂY)
+                enableStashBuffer: false, 
+                stashInitialSize: 128,
+                liveBufferLatencyChasing: true // Cho phép bỏ qua khung hình chậm để đuổi kịp thời gian thực
+            });
+            
+            mpegtsPlayer.attachMediaElement(videoElement);
+            mpegtsPlayer.load();
+            mpegtsPlayer.play();
+            
+            // Trả về null để Chromecast biết "Tao đã tự xử lý video rồii, Google khỏi nhúng tay."
+            return null; 
+        }
+        return request;
+      }
+    );
+
+    // Kích hoạt nhận tín hiệu
+    context.start({ disableIdleTimeout: true });
+  </script>
+</body>
+</html>
