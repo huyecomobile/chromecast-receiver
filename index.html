@@ -31,33 +31,28 @@
         // Cắm vòi mpegts.js vào để giải mã luồng raw
         if (mpegts.getFeatureList().mseLivePlayback) {
             const videoElement = document.getElementById('tvPlayer');
+            
+            // Xoá luồng cũ nếu có
             if (mpegtsPlayer) { mpegtsPlayer.destroy(); }
+
+            // Khởi tạo luồng siêu tốc
             mpegtsPlayer = mpegts.createPlayer({
                 type: 'mse', 
                 isLive: true,
                 url: streamUrl,
-                cors: true,
-                hasAudio: false,       // 1. Chỉ định rõ không chờ Audio Track
-                hasVideo: true
+                cors: true // Cực kỳ quan trọng để lách lỗi chặn domain
             }, {
-                enableStashBuffer: true, 
-                stashInitialSize: 512, // 2. Tăng đệm nhồi ban đầu tránh hụt hơi
-                // Tạm thời tắt tính năng này để loại trừ lỗi Timestamp từ Android
-                // Khi stream đã chạy mượt không đứng thì mới bật lại để tối ưu độ trễ
-                liveBufferLatencyChasing: false, 
-                
-                // Mẹo nhỏ: Bật cờ này để nếu mạng chập chờn sẽ tự phục hồi
-                lazyLoad: false, 
-                liveSyncBehavior: 'minpos' 
+                // ÉP TRÌNH PHÁT BỎ TRÁNH ĐỆM (LOW-LATENCY CHÌA KHÓA Ở ĐÂY)
+                enableStashBuffer: false, 
+                stashInitialSize: 128,
+                liveBufferLatencyChasing: true // Cho phép bỏ qua khung hình chậm để đuổi kịp thời gian thực
             });
             
-            // Lắng nghe lỗi để biết vì sao nó đứng hình
-            mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetails, errorInfo) => {
-                console.log("MPEGTS LỖI: ", errorType, errorDetails, errorInfo);
-            });
             mpegtsPlayer.attachMediaElement(videoElement);
             mpegtsPlayer.load();
             mpegtsPlayer.play();
+            
+            // Trả về null để Chromecast biết "Tao đã tự xử lý video rồii, Google khỏi nhúng tay."
             return null; 
         }
         return request;
