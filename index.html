@@ -43,7 +43,7 @@
                 cors: true // Cực kỳ quan trọng để lách lỗi chặn domain
             }, {
                 // ÉP TRÌNH PHÁT BỎ TRÁNH ĐỆM (LOW-LATENCY CHÌA KHÓA Ở ĐÂY)
-                enableStashBuffer: false, 
+                enableStashBuffer: true, 
                 stashInitialSize: 128,
                 liveBufferLatencyChasing: true // Cho phép bỏ qua khung hình chậm để đuổi kịp thời gian thực
             });
