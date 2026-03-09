@@ -7,11 +7,18 @@
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
-    video { width: 100%; height: 100%; object-fit: contain; }
+    #tvPlayer {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: contain;
+      z-index: 9999;
+      background: #000;
+    }
   </style>
 </head>
 <body>
-  <video id="tvPlayer" autoplay muted></video>
+  <video id="tvPlayer" autoplay playsinline></video>
   <script>
     const context = cast.framework.CastReceiverContext.getInstance();
     const playerManager = context.getPlayerManager();
@@ -41,15 +48,22 @@
             fixAudioTimestampGap: true
         });
 
-        // KHÔNG đặt error handler retry → ngăn reconnection storm
         player.on(mpegts.Events.ERROR, (e, d, i) => {
-            console.error('mpegts error (no retry):', e, d, i);
+            console.error('mpegts error:', e, d, i);
         });
 
         player.attachMediaElement(videoElement);
         player.load();
 
-        // Xử lý video stall → nhảy tới live edge
+        // Gọi play() liên tục đến khi thành công
+        function tryPlay() {
+            videoElement.play().catch(() => {
+                setTimeout(tryPlay, 500);
+            });
+        }
+        tryPlay();
+
+        // Khi stall → nhảy tới live edge
         videoElement.addEventListener('waiting', () => {
             try {
                 const buf = videoElement.buffered;
@@ -61,10 +75,6 @@
                 }
             } catch(e) {}
         });
-
-        videoElement.play().then(() => {
-            videoElement.muted = false;
-        }).catch(() => {});
 
         return null;
       }
