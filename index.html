@@ -2,13 +2,16 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>EcoMirror fMP4</title>
+  <title>EcoMirror</title>
   <script type="text/javascript" src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
+    video { width: 100%; height: 100%; object-fit: contain; }
   </style>
 </head>
 <body>
+  <video id="tvPlayer" autoplay muted></video>
   <script>
     const context = cast.framework.CastReceiverContext.getInstance();
     const playerManager = context.getPlayerManager();
@@ -16,10 +19,54 @@
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
       request => {
-        // Đảm bảo contentType đúng cho fMP4
-        request.media.contentType = 'video/mp4';
-        // Để CAF player tự fetch và play
-        return request;
+        const streamUrl = request.media.contentId;
+        if (!mpegts.getFeatureList().mseLivePlayback) return request;
+
+        const videoElement = document.getElementById('tvPlayer');
+        const player = mpegts.createPlayer({
+            type: 'mse',
+            isLive: true,
+            url: streamUrl,
+            cors: true
+        }, {
+            enableStashBuffer: false,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 1.5,
+            liveBufferLatencyMinRemain: 0.3,
+            lazyLoad: false,
+            deferLoadAfterSourceOpen: false,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 5,
+            autoCleanupMinBackwardDuration: 3,
+            fixAudioTimestampGap: true
+        });
+
+        // KHÔNG đặt error handler retry → ngăn reconnection storm
+        player.on(mpegts.Events.ERROR, (e, d, i) => {
+            console.error('mpegts error (no retry):', e, d, i);
+        });
+
+        player.attachMediaElement(videoElement);
+        player.load();
+
+        // Xử lý video stall → nhảy tới live edge
+        videoElement.addEventListener('waiting', () => {
+            try {
+                const buf = videoElement.buffered;
+                if (buf.length > 0) {
+                    const end = buf.end(buf.length - 1);
+                    if (end - videoElement.currentTime > 0.5) {
+                        videoElement.currentTime = end - 0.1;
+                    }
+                }
+            } catch(e) {}
+        });
+
+        videoElement.play().then(() => {
+            videoElement.muted = false;
+        }).catch(() => {});
+
+        return null;
       }
     );
 
