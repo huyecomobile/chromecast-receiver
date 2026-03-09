@@ -2,77 +2,104 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>EcoMirror Tốc Độ Cao</title>
+  <title>EcoMirror fMP4</title>
   <script type="text/javascript" src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
   <style>
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #fff; overflow: hidden; }
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
     video { width: 100%; height: 100%; object-fit: contain; }
   </style>
 </head>
 <body>
-  <video id="tvPlayer" autoplay muted></video>
+  <video id="tvPlayer" autoplay></video>
   <script>
     const context = cast.framework.CastReceiverContext.getInstance();
     const playerManager = context.getPlayerManager();
-    let mpegtsPlayer = null;
-
-    function createPlayer(streamUrl) {
-        const videoElement = document.getElementById('tvPlayer');
-        if (mpegtsPlayer) {
-            try { mpegtsPlayer.destroy(); } catch(e) {}
-            mpegtsPlayer = null;
-        }
-
-        mpegtsPlayer = mpegts.createPlayer({
-            type: 'mse',
-            isLive: true,
-            url: streamUrl,
-            cors: true
-        }, {
- enableStashBuffer: false,        // GIỮ NGUYÊN code gốc
-    stashInitialSize: 128,           // GIỮ NGUYÊN code gốc  
-    liveBufferLatencyChasing: true,  // GIỮ NGUYÊN code gốc
-    lazyLoad: false,                 // ← CHỈ THÊM DÒNG NÀY
-    deferLoadAfterSourceOpen: false   // ← VÀ DÒNG NÀY
-        });
-
-        mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-            console.error('mpegts error:', errorType, errorDetail, errorInfo);
-            setTimeout(() => { createPlayer(streamUrl); }, 2000);
-        });
-
-        mpegtsPlayer.on(mpegts.Events.STATISTICS_INFO, (stats) => {
-            try {
-                const buffered = videoElement.buffered;
-                if (buffered.length > 0 && stats.droppedFrames > 50) {
-                    videoElement.currentTime = buffered.end(buffered.length - 1) - 0.3;
-                }
-            } catch (e) {}
-        });
-
-        mpegtsPlayer.attachMediaElement(videoElement);
-        mpegtsPlayer.load();
-        
-        // Unmute sau khi play thành công
-        videoElement.play().then(() => {
-            videoElement.muted = false;
-        }).catch(() => {
-            // Chromecast autoplay policy — thử lại với muted
-            videoElement.muted = true;
-            videoElement.play();
-        });
-    }
 
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
       request => {
         const streamUrl = request.media.contentId;
-        if (mpegts.getFeatureList().mseLivePlayback) {
-            createPlayer(streamUrl);
-            return null;
-        }
-        return request;
+        const videoElement = document.getElementById('tvPlayer');
+
+        // Tạo MediaSource
+        const mediaSource = new MediaSource();
+        videoElement.src = URL.createObjectURL(mediaSource);
+
+        mediaSource.addEventListener('sourceopen', () => {
+          // H.264 Baseline Level 3.1 + AAC LC
+          const mimeCodec = 'video/mp4; codecs="avc1.42E01F,mp4a.40.2"';
+          if (!MediaSource.isTypeSupported(mimeCodec)) {
+            console.error('Codec not supported:', mimeCodec);
+            return;
+          }
+
+          const sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
+          const queue = []; // Buffer queue khi sourceBuffer đang updating
+          let totalAppended = 0;
+
+          function appendNext() {
+            if (queue.length > 0 && !sourceBuffer.updating) {
+              sourceBuffer.appendBuffer(queue.shift());
+            }
+          }
+
+          sourceBuffer.addEventListener('updateend', () => {
+            totalAppended++;
+            // Auto cleanup: giữ tối đa 10 giây buffer phía sau
+            try {
+              if (videoElement.buffered.length > 0) {
+                const currentTime = videoElement.currentTime;
+                const bufferStart = videoElement.buffered.start(0);
+                if (currentTime - bufferStart > 10) {
+                  sourceBuffer.remove(bufferStart, currentTime - 5);
+                  return; // Đợi remove xong rồi mới append tiếp
+                }
+              }
+            } catch(e) {}
+            appendNext();
+          });
+
+          // Fetch stream với ReadableStream
+          fetch(streamUrl).then(response => {
+            const reader = response.body.getReader();
+
+            function pump() {
+              reader.read().then(({ done, value }) => {
+                if (done) {
+                  if (!sourceBuffer.updating) mediaSource.endOfStream();
+                  return;
+                }
+
+                if (sourceBuffer.updating || queue.length > 0) {
+                  queue.push(value);
+                } else {
+                  sourceBuffer.appendBuffer(value);
+                }
+
+                pump();
+              }).catch(err => {
+                console.error('Read error:', err);
+                // Auto retry sau 3 giây
+                setTimeout(() => {
+                  fetch(streamUrl).then(r => {
+                    const newReader = r.body.getReader();
+                    // Simplified retry - reload page
+                    window.location.reload();
+                  });
+                }, 3000);
+              });
+            }
+
+            pump();
+          });
+
+          // Play khi có dữ liệu
+          videoElement.addEventListener('canplay', () => {
+            videoElement.play().catch(() => {});
+          }, { once: true });
+        });
+
+        return null; // Đã xử lý, không dùng CAF player
       }
     );
 
