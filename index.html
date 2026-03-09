@@ -30,22 +30,11 @@
             url: streamUrl,
             cors: true
         }, {
-            // === CRITICAL: Các config cho live stream ===
-            enableStashBuffer: false,           // KHÔNG buffer — dữ liệu đi thẳng vào transmuxer
-            lazyLoad: false,                    // KHÔNG TỰ NGẮT KẾT NỐI HTTP (đây là live!)
-            deferLoadAfterSourceOpen: false,     // Load ngay, không đợi sourceopen event
-            
-            // === Latency chasing ===
-            liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 1.5,
-            liveBufferLatencyMinRemain: 0.3,
-            
-            // === Worker & Cleanup ===
-            enableWorker: true,
-            autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 5,
-            autoCleanupMinBackwardDuration: 3,
-            fixAudioTimestampGap: true
+ enableStashBuffer: false,        // GIỮ NGUYÊN code gốc
+    stashInitialSize: 128,           // GIỮ NGUYÊN code gốc  
+    liveBufferLatencyChasing: true,  // GIỮ NGUYÊN code gốc
+    lazyLoad: false,                 // ← CHỈ THÊM DÒNG NÀY
+    deferLoadAfterSourceOpen: false   // ← VÀ DÒNG NÀY
         });
 
         mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
