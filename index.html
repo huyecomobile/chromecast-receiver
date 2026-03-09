@@ -42,12 +42,31 @@
                 url: streamUrl,
                 cors: true // Cực kỳ quan trọng để lách lỗi chặn domain
             }, {
-                // ÉP TRÌNH PHÁT BỎ TRÁNH ĐỆM (LOW-LATENCY CHÌA KHÓA Ở ĐÂY)
-                enableStashBuffer: false, 
-                stashInitialSize: 128,
-                liveBufferLatencyChasing: true // Cho phép bỏ qua khung hình chậm để đuổi kịp thời gian thực
+    enableStashBuffer: true,        // PHẢI bật để accumulate đủ dữ liệu
+    stashInitialSize: 384,   // 384KB - đủ cho mpegts.js parse TS tables
+    enableWorker: true,             // Offload transmuxing sang Web Worker
+    liveBufferLatencyChasing: true,
+    liveBufferLatencyMaxLatency: 1.5,  // Tối đa 1.5s buffer
+    liveBufferLatencyMinRemain: 0.3,   // Giữ 300ms minimum
+    autoCleanupSourceBuffer: true,
+    autoCleanupMaxBackwardDuration: 5,
+    autoCleanupMinBackwardDuration: 3,
+    fixAudioTimestampGap: true
             });
-            
+            mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+    console.error('mpegts error:', errorType, errorDetail, errorInfo);
+    // Auto-retry
+    setTimeout(() => {
+        mpegtsPlayer.destroy();
+        // Re-create player...
+    }, 1000);
+});
+mpegtsPlayer.on(mpegts.Events.STATISTICS_INFO, (stats) => {
+    // Monitor dropped frames
+    if (stats.droppedFrames > 100) {
+        mpegtsPlayer.currentTime = mpegtsPlayer.buffered.end(0) - 0.5;
+    }
+});
             mpegtsPlayer.attachMediaElement(videoElement);
             mpegtsPlayer.load();
             mpegtsPlayer.play();
