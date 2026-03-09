@@ -7,30 +7,23 @@
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
-    #tvPlayer {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      object-fit: contain;
-      z-index: 9999;
-      background: #000;
-    }
+    #tvPlayer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 9999; background: #000; }
   </style>
 </head>
 <body>
-  <video id="tvPlayer" autoplay playsinline></video>
+  <video id="tvPlayer" autoplay muted></video>
   <script>
-    const context = cast.framework.CastReceiverContext.getInstance();
-    const playerManager = context.getPlayerManager();
+    var context = cast.framework.CastReceiverContext.getInstance();
+    var playerManager = context.getPlayerManager();
 
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
-      request => {
-        const streamUrl = request.media.contentId;
+      function(request) {
+        var streamUrl = request.media.contentId;
         if (!mpegts.getFeatureList().mseLivePlayback) return request;
 
-        const videoElement = document.getElementById('tvPlayer');
-        const player = mpegts.createPlayer({
+        var videoElement = document.getElementById('tvPlayer');
+        var player = mpegts.createPlayer({
             type: 'mse',
             isLive: true,
             url: streamUrl,
@@ -48,22 +41,21 @@
             fixAudioTimestampGap: true
         });
 
-        player.on(mpegts.Events.ERROR, (e, d, i) => {
+        player.on(mpegts.Events.ERROR, function(e, d, i) {
             console.error('mpegts error:', e, d, i);
         });
 
         player.attachMediaElement(videoElement);
         player.load();
 
-        // Cưỡng bức play + nhảy tới live edge mỗi giây
-        setInterval(() => {
+        setInterval(function() {
             if (videoElement.paused || videoElement.ended) {
-                videoElement.play().catch(() => {});
+                videoElement.play().catch(function(){});
             }
             try {
-                const buf = videoElement.buffered;
+                var buf = videoElement.buffered;
                 if (buf.length > 0) {
-                    const end = buf.end(buf.length - 1);
+                    var end = buf.end(buf.length - 1);
                     if (end - videoElement.currentTime > 1) {
                         videoElement.currentTime = end - 0.1;
                     }
