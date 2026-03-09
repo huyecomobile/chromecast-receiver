@@ -3,82 +3,84 @@
 <head>
   <meta charset="utf-8">
   <title>EcoMirror Tốc Độ Cao</title>
-  <!-- Nạp thư viện điều khiển Chromecast -->
   <script type="text/javascript" src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-  <!-- Nạp thư viện hút luồng .ts siêu tốc độ (mpegts.js) -->
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
-  
   <style>
-    /* Làm nền full đen, video che kín màn hình Tivi */
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
     video { width: 100%; height: 100%; object-fit: contain; }
   </style>
 </head>
 <body>
   <video id="tvPlayer" autoplay></video>
-  
   <script>
     const context = cast.framework.CastReceiverContext.getInstance();
     const playerManager = context.getPlayerManager();
     let mpegtsPlayer = null;
+    let currentStreamUrl = null;
 
-    // Lắng nghe khi điện thoại Android gửi link http://ip:8082/stream.ts qua
+    function createPlayer(streamUrl) {
+        const videoElement = document.getElementById('tvPlayer');
+        
+        if (mpegtsPlayer) {
+            mpegtsPlayer.destroy();
+            mpegtsPlayer = null;
+        }
+
+        mpegtsPlayer = mpegts.createPlayer({
+            type: 'mse',
+            isLive: true,
+            url: streamUrl,
+            cors: true
+        }, {
+            enableStashBuffer: true,
+            stashInitialSize: 384,            // 384KB (đơn vị KB, KHÔNG phải bytes)
+            enableWorker: true,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 1.5,
+            liveBufferLatencyMinRemain: 0.3,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 5,
+            autoCleanupMinBackwardDuration: 3,
+            fixAudioTimestampGap: true
+        });
+
+        mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+            console.error('mpegts error:', errorType, errorDetail, errorInfo);
+            // Auto-retry: destroy rồi tạo lại player
+            setTimeout(() => {
+                createPlayer(streamUrl);
+            }, 1000);
+        });
+
+        mpegtsPlayer.on(mpegts.Events.STATISTICS_INFO, (stats) => {
+            if (stats.droppedFrames > 100) {
+                try {
+                    const buffered = videoElement.buffered;
+                    if (buffered.length > 0) {
+                        videoElement.currentTime = buffered.end(buffered.length - 1) - 0.5;
+                    }
+                } catch (e) {}
+            }
+        });
+
+        mpegtsPlayer.attachMediaElement(videoElement);
+        mpegtsPlayer.load();
+        mpegtsPlayer.play();
+    }
+
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
       request => {
-        const streamUrl = request.media.contentId; // Chính là link stream của ta
-        
-        // Cắm vòi mpegts.js vào để giải mã luồng raw
+        const streamUrl = request.media.contentId;
         if (mpegts.getFeatureList().mseLivePlayback) {
-            const videoElement = document.getElementById('tvPlayer');
-            
-            // Xoá luồng cũ nếu có
-            if (mpegtsPlayer) { mpegtsPlayer.destroy(); }
-
-            // Khởi tạo luồng siêu tốc
-            mpegtsPlayer = mpegts.createPlayer({
-                type: 'mse', 
-                isLive: true,
-                url: streamUrl,
-                cors: true // Cực kỳ quan trọng để lách lỗi chặn domain
-            }, {
-    enableStashBuffer: true,        // PHẢI bật để accumulate đủ dữ liệu
-    stashInitialSize: 384,   // 384KB - đủ cho mpegts.js parse TS tables
-    enableWorker: true,             // Offload transmuxing sang Web Worker
-    liveBufferLatencyChasing: true,
-    liveBufferLatencyMaxLatency: 1.5,  // Tối đa 1.5s buffer
-    liveBufferLatencyMinRemain: 0.3,   // Giữ 300ms minimum
-    autoCleanupSourceBuffer: true,
-    autoCleanupMaxBackwardDuration: 5,
-    autoCleanupMinBackwardDuration: 3,
-    fixAudioTimestampGap: true
-            });
-            mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-    console.error('mpegts error:', errorType, errorDetail, errorInfo);
-    // Auto-retry
-    setTimeout(() => {
-        mpegtsPlayer.destroy();
-        // Re-create player...
-    }, 1000);
-});
-mpegtsPlayer.on(mpegts.Events.STATISTICS_INFO, (stats) => {
-    // Monitor dropped frames
-    if (stats.droppedFrames > 100) {
-        mpegtsPlayer.currentTime = mpegtsPlayer.buffered.end(0) - 0.5;
-    }
-});
-            mpegtsPlayer.attachMediaElement(videoElement);
-            mpegtsPlayer.load();
-            mpegtsPlayer.play();
-            
-            // Trả về null để Chromecast biết "Tao đã tự xử lý video rồii, Google khỏi nhúng tay."
-            return null; 
+            currentStreamUrl = streamUrl;
+            createPlayer(streamUrl);
+            return null;
         }
         return request;
       }
     );
 
-    // Kích hoạt nhận tín hiệu
     context.start({ disableIdleTimeout: true });
   </script>
 </body>
