@@ -11,18 +11,16 @@
   </style>
 </head>
 <body>
-  <video id="tvPlayer" autoplay></video>
+  <video id="tvPlayer" autoplay muted></video>
   <script>
     const context = cast.framework.CastReceiverContext.getInstance();
     const playerManager = context.getPlayerManager();
     let mpegtsPlayer = null;
-    let currentStreamUrl = null;
 
     function createPlayer(streamUrl) {
         const videoElement = document.getElementById('tvPlayer');
-        
         if (mpegtsPlayer) {
-            mpegtsPlayer.destroy();
+            try { mpegtsPlayer.destroy(); } catch(e) {}
             mpegtsPlayer = null;
         }
 
@@ -32,12 +30,18 @@
             url: streamUrl,
             cors: true
         }, {
-            enableStashBuffer: true,
-            stashInitialSize: 384,            // 384KB (đơn vị KB, KHÔNG phải bytes)
-            enableWorker: true,
+            // === CRITICAL: Các config cho live stream ===
+            enableStashBuffer: false,           // KHÔNG buffer — dữ liệu đi thẳng vào transmuxer
+            lazyLoad: false,                    // KHÔNG TỰ NGẮT KẾT NỐI HTTP (đây là live!)
+            deferLoadAfterSourceOpen: false,     // Load ngay, không đợi sourceopen event
+            
+            // === Latency chasing ===
             liveBufferLatencyChasing: true,
             liveBufferLatencyMaxLatency: 1.5,
             liveBufferLatencyMinRemain: 0.3,
+            
+            // === Worker & Cleanup ===
+            enableWorker: true,
             autoCleanupSourceBuffer: true,
             autoCleanupMaxBackwardDuration: 5,
             autoCleanupMinBackwardDuration: 3,
@@ -46,26 +50,29 @@
 
         mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
             console.error('mpegts error:', errorType, errorDetail, errorInfo);
-            // Auto-retry: destroy rồi tạo lại player
-            setTimeout(() => {
-                createPlayer(streamUrl);
-            }, 1000);
+            setTimeout(() => { createPlayer(streamUrl); }, 2000);
         });
 
         mpegtsPlayer.on(mpegts.Events.STATISTICS_INFO, (stats) => {
-            if (stats.droppedFrames > 100) {
-                try {
-                    const buffered = videoElement.buffered;
-                    if (buffered.length > 0) {
-                        videoElement.currentTime = buffered.end(buffered.length - 1) - 0.5;
-                    }
-                } catch (e) {}
-            }
+            try {
+                const buffered = videoElement.buffered;
+                if (buffered.length > 0 && stats.droppedFrames > 50) {
+                    videoElement.currentTime = buffered.end(buffered.length - 1) - 0.3;
+                }
+            } catch (e) {}
         });
 
         mpegtsPlayer.attachMediaElement(videoElement);
         mpegtsPlayer.load();
-        mpegtsPlayer.play();
+        
+        // Unmute sau khi play thành công
+        videoElement.play().then(() => {
+            videoElement.muted = false;
+        }).catch(() => {
+            // Chromecast autoplay policy — thử lại với muted
+            videoElement.muted = true;
+            videoElement.play();
+        });
     }
 
     playerManager.setMessageInterceptor(
@@ -73,7 +80,6 @@
       request => {
         const streamUrl = request.media.contentId;
         if (mpegts.getFeatureList().mseLivePlayback) {
-            currentStreamUrl = streamUrl;
             createPlayer(streamUrl);
             return null;
         }
