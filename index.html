@@ -55,26 +55,21 @@
         player.attachMediaElement(videoElement);
         player.load();
 
-        // Gọi play() liên tục đến khi thành công
-        function tryPlay() {
-            videoElement.play().catch(() => {
-                setTimeout(tryPlay, 500);
-            });
-        }
-        tryPlay();
-
-        // Khi stall → nhảy tới live edge
-        videoElement.addEventListener('waiting', () => {
+        // Cưỡng bức play + nhảy tới live edge mỗi giây
+        setInterval(() => {
+            if (videoElement.paused || videoElement.ended) {
+                videoElement.play().catch(() => {});
+            }
             try {
                 const buf = videoElement.buffered;
                 if (buf.length > 0) {
                     const end = buf.end(buf.length - 1);
-                    if (end - videoElement.currentTime > 0.5) {
+                    if (end - videoElement.currentTime > 1) {
                         videoElement.currentTime = end - 0.1;
                     }
                 }
             } catch(e) {}
-        });
+        }, 1000);
 
         return null;
       }
