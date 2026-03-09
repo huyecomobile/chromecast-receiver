@@ -10,7 +10,7 @@
   </style>
 </head>
 <body>
-  <video id="tvPlayer" autoplay></video>
+  <video id="tvPlayer" autoplay muted></video>
   <script>
     const context = cast.framework.CastReceiverContext.getInstance();
     const playerManager = context.getPlayerManager();
@@ -21,85 +21,14 @@
         const streamUrl = request.media.contentId;
         const videoElement = document.getElementById('tvPlayer');
 
-        // Tạo MediaSource
-        const mediaSource = new MediaSource();
-        videoElement.src = URL.createObjectURL(mediaSource);
+        // Đơn giản nhất: set src trực tiếp, browser tự fetch + play fMP4
+        videoElement.src = streamUrl;
+        videoElement.load();
+        videoElement.play().then(() => {
+          videoElement.muted = false;
+        }).catch(() => {});
 
-        mediaSource.addEventListener('sourceopen', () => {
-          // H.264 Baseline Level 3.1 + AAC LC
-          const mimeCodec = 'video/mp4; codecs="avc1.42E01F,mp4a.40.2"';
-          if (!MediaSource.isTypeSupported(mimeCodec)) {
-            console.error('Codec not supported:', mimeCodec);
-            return;
-          }
-
-          const sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
-          const queue = []; // Buffer queue khi sourceBuffer đang updating
-          let totalAppended = 0;
-
-          function appendNext() {
-            if (queue.length > 0 && !sourceBuffer.updating) {
-              sourceBuffer.appendBuffer(queue.shift());
-            }
-          }
-
-          sourceBuffer.addEventListener('updateend', () => {
-            totalAppended++;
-            // Auto cleanup: giữ tối đa 10 giây buffer phía sau
-            try {
-              if (videoElement.buffered.length > 0) {
-                const currentTime = videoElement.currentTime;
-                const bufferStart = videoElement.buffered.start(0);
-                if (currentTime - bufferStart > 10) {
-                  sourceBuffer.remove(bufferStart, currentTime - 5);
-                  return; // Đợi remove xong rồi mới append tiếp
-                }
-              }
-            } catch(e) {}
-            appendNext();
-          });
-
-          // Fetch stream với ReadableStream
-          fetch(streamUrl).then(response => {
-            const reader = response.body.getReader();
-
-            function pump() {
-              reader.read().then(({ done, value }) => {
-                if (done) {
-                  if (!sourceBuffer.updating) mediaSource.endOfStream();
-                  return;
-                }
-
-                if (sourceBuffer.updating || queue.length > 0) {
-                  queue.push(value);
-                } else {
-                  sourceBuffer.appendBuffer(value);
-                }
-
-                pump();
-              }).catch(err => {
-                console.error('Read error:', err);
-                // Auto retry sau 3 giây
-                setTimeout(() => {
-                  fetch(streamUrl).then(r => {
-                    const newReader = r.body.getReader();
-                    // Simplified retry - reload page
-                    window.location.reload();
-                  });
-                }, 3000);
-              });
-            }
-
-            pump();
-          });
-
-          // Play khi có dữ liệu
-          videoElement.addEventListener('canplay', () => {
-            videoElement.play().catch(() => {});
-          }, { once: true });
-        });
-
-        return null; // Đã xử lý, không dùng CAF player
+        return null;
       }
     );
 
