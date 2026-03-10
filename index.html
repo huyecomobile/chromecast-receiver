@@ -100,6 +100,9 @@
                     if (end - start >= 2) {
                         clearInterval(checkReady);
                         videoElement.currentTime = Math.max(end - 0.5, start);
+                       // ✅ Unmute lại trước khi play (phòng trường hợp bị reset)
+                        videoElement.muted = false;
+                        videoElement.volume = 1.0;
                         videoElement.play().catch(function(){});
                         playStarted = true;
                         bgImage.classList.add('hidden');
