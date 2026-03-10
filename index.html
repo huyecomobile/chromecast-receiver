@@ -30,19 +30,10 @@
         var player = mpegts.createPlayer({
             type: 'mse',
             isLive: true,
-            url: streamUrl,
-            cors: true
+            url: streamUrl
         }, {
-            enableStashBuffer: false,
-            liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 1.5,
-            liveBufferLatencyMinRemain: 0.3,
             lazyLoad: false,
-            deferLoadAfterSourceOpen: false,
-            autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 5,
-            autoCleanupMinBackwardDuration: 3,
-            fixAudioTimestampGap: true
+            deferLoadAfterSourceOpen: false
         });
 
         player.on(mpegts.Events.ERROR, function(e, d, i) {
@@ -66,7 +57,6 @@
                 }
             } catch(e) {}
 
-            // Debug overlay
             var info = '';
             info += 'paused: ' + videoElement.paused + '\n';
             info += 'readyState: ' + videoElement.readyState + '\n';
