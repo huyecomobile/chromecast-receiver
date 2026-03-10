@@ -33,7 +33,10 @@
             url: streamUrl
         }, {
             lazyLoad: false,
-            deferLoadAfterSourceOpen: false
+            deferLoadAfterSourceOpen: false,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 10,
+            autoCleanupMinBackwardDuration: 5
         });
 
         player.on(mpegts.Events.ERROR, function(e, d, i) {
@@ -51,8 +54,8 @@
                 var buf = videoElement.buffered;
                 if (buf.length > 0) {
                     var end = buf.end(buf.length - 1);
-                    if (end - videoElement.currentTime > 1) {
-                        videoElement.currentTime = end - 0.1;
+                    if (end - videoElement.currentTime > 2) {
+                        videoElement.currentTime = end - 0.5;
                     }
                 }
             } catch(e) {}
