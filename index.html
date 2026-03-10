@@ -48,7 +48,7 @@
   <!-- Ảnh nền hiển thị khi idle -->
   <img id="bgImage" src="https://iconchangerstorage.ecomobileapp.com/static/storage/huy/huy.jpg" alt="EcoMirror Background" />
 
-  <video id="tvPlayer" muted></video>
+  <video id="tvPlayer"></video>
 
   <script>
     var context = cast.framework.CastReceiverContext.getInstance();
@@ -63,7 +63,6 @@
         if (!mpegts.getFeatureList().mseLivePlayback) return request;
 
         var videoElement = document.getElementById('tvPlayer');
-        var debugEl = document.getElementById('debug');
         var playStarted = false;
 
         var player = mpegts.createPlayer({
@@ -121,22 +120,6 @@
                     }
                 }
             } catch(e) {}
-
-            var info = '';
-            info += 'paused: ' + videoElement.paused + '\n';
-            info += 'readyState: ' + videoElement.readyState + '\n';
-            info += 'currentTime: ' + videoElement.currentTime.toFixed(3) + '\n';
-            info += 'networkState: ' + videoElement.networkState + '\n';
-            var bufInfo = '';
-            try {
-                for (var i = 0; i < videoElement.buffered.length; i++) {
-                    bufInfo += videoElement.buffered.start(i).toFixed(2) + '-' + videoElement.buffered.end(i).toFixed(2) + ' ';
-                }
-            } catch(e) { bufInfo = 'error'; }
-            info += 'buffered: ' + (bufInfo || 'empty') + '\n';
-            info += 'error: ' + (videoElement.error ? 'code=' + videoElement.error.code : 'none') + '\n';
-            info += 'mpegts_err: ' + (mpegtsErrors.length > 0 ? mpegtsErrors.slice(-2).join(', ') : 'none');
-            debugEl.innerText = info;
         }, 500);
 
         return null;
