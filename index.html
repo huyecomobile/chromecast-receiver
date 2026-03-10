@@ -12,7 +12,7 @@
   </style>
 </head>
 <body>
-  <video id="tvPlayer" autoplay muted></video>
+  <video id="tvPlayer" muted></video>
   <div id="debug">Loading...</div>
   <script>
     var context = cast.framework.CastReceiverContext.getInstance();
@@ -27,6 +27,8 @@
 
         var videoElement = document.getElementById('tvPlayer');
         var debugEl = document.getElementById('debug');
+        var playStarted = false;
+
         var player = mpegts.createPlayer({
             type: 'mse',
             isLive: true,
@@ -50,16 +52,33 @@
         player.load();
 
         setInterval(function() {
-            if (videoElement.paused || videoElement.ended) {
-                videoElement.play().catch(function(){});
-            }
             try {
                 var buf = videoElement.buffered;
                 if (buf.length > 0) {
                     var end = buf.end(buf.length - 1);
-                    if (end - videoElement.currentTime > 3) {
-                        videoElement.currentTime = end - 1;
+                    var ahead = end - videoElement.currentTime;
+
+                    if (!playStarted) {
+                        // Đợi buffer đủ 3 giây trước khi play lần đầu
+                        if (end - buf.start(0) > 3) {
+                            videoElement.currentTime = end - 2;
+                            videoElement.play().catch(function(){});
+                            playStarted = true;
+                        }
+                    } else {
+                        // Nếu buffer quá xa → nhảy tới live edge
+                        if (ahead > 6) {
+                            videoElement.currentTime = end - 2;
+                        }
+                        // Nếu bị stall (hết buffer) → nhảy lại vị trí có buffer
+                        if (videoElement.readyState <= 2 && ahead < 0.5 && ahead >= 0) {
+                            videoElement.currentTime = Math.max(buf.start(0), end - 2);
+                            videoElement.play().catch(function(){});
+                        }
                     }
+                }
+                if (playStarted && videoElement.paused) {
+                    videoElement.play().catch(function(){});
                 }
             } catch(e) {}
 
@@ -76,9 +95,10 @@
             } catch(e) { bufInfo = 'error'; }
             info += 'buffered: ' + (bufInfo || 'empty') + '\n';
             info += 'error: ' + (videoElement.error ? 'code=' + videoElement.error.code : 'none') + '\n';
-            info += 'mpegts_err: ' + (mpegtsErrors.length > 0 ? mpegtsErrors.slice(-3).join(', ') : 'none');
+            info += 'started: ' + playStarted + '\n';
+            info += 'mpegts_err: ' + (mpegtsErrors.length > 0 ? mpegtsErrors.slice(-2).join(', ') : 'none');
             debugEl.innerText = info;
-        }, 1000);
+        }, 500);
 
         return null;
       }
