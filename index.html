@@ -12,8 +12,8 @@
   </style>
 </head>
 <body>
-  <video id="tvPlayer" ></video>
-    <div id="debug">Loading...</div>
+  <video id="tvPlayer" autoplay muted></video>
+  <div id="debug">Loading...</div>
   <script>
     var context = cast.framework.CastReceiverContext.getInstance();
     var playerManager = context.getPlayerManager();
@@ -32,11 +32,14 @@
             isLive: true,
             url: streamUrl
         }, {
+            enableStashBuffer: false,
+            stashInitialSize: 128,
             lazyLoad: false,
             deferLoadAfterSourceOpen: false,
             autoCleanupSourceBuffer: true,
             autoCleanupMaxBackwardDuration: 10,
-            autoCleanupMinBackwardDuration: 5
+            autoCleanupMinBackwardDuration: 5,
+            fixAudioTimestampGap: true
         });
 
         player.on(mpegts.Events.ERROR, function(e, d, i) {
@@ -54,8 +57,8 @@
                 var buf = videoElement.buffered;
                 if (buf.length > 0) {
                     var end = buf.end(buf.length - 1);
-                    if (end - videoElement.currentTime > 2) {
-                        videoElement.currentTime = end - 0.5;
+                    if (end - videoElement.currentTime > 3) {
+                        videoElement.currentTime = end - 1;
                     }
                 }
             } catch(e) {}
