@@ -70,8 +70,9 @@
             isLive: true,
             url: streamUrl
         }, {
+            enableWorker: true,
             enableStashBuffer: false,
-            stashInitialSize: 128,
+            stashInitialSize: 256,
             lazyLoad: false,
             deferLoadAfterSourceOpen: false,
             autoCleanupSourceBuffer: true,
