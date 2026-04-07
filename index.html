@@ -7,62 +7,44 @@
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
-
-    /* Ảnh nền hiển thị khi chưa play video */
     #bgImage {
-      position: absolute;
-      top: 0; left: 0;
+      position: absolute; top: 0; left: 0;
       width: 100%; height: 100%;
-      object-fit: cover;
-      z-index: 1;
+      object-fit: cover; z-index: 1;
       transition: opacity 0.8s ease;
     }
-    #bgImage.hidden {
-      opacity: 0;
-      pointer-events: none;
-    }
-
+    #bgImage.hidden { opacity: 0; pointer-events: none; }
     #tvPlayer {
-      position: absolute;
-      top: 0; left: 0;
+      position: absolute; top: 0; left: 0;
       width: 100%; height: 100%;
-      object-fit: contain;
-      z-index: 9999;
+      object-fit: contain; z-index: 9999;
       background: transparent;
-    }
-
-    #debug {
-      position: absolute;
-      top: 10px; left: 10px;
-      color: #0f0;
-      font-size: 24px;
-      z-index: 99999;
-      font-family: monospace;
-      background: rgba(0,0,0,0.8);
-      padding: 15px;
-      white-space: pre;
     }
   </style>
 </head>
 <body>
-  <!-- Ảnh nền hiển thị khi idle -->
   <img id="bgImage" src="https://iconchangerstorage.ecomobileapp.com/static/storage/huy/Congratulation.png" alt="EcoMirror Background" />
-
   <video id="tvPlayer"></video>
 
   <script>
     var context = cast.framework.CastReceiverContext.getInstance();
     var playerManager = context.getPlayerManager();
-    var mpegtsErrors = [];
     var bgImage = document.getElementById('bgImage');
-    var currentPlayer = null;
 
-    playerManager.setMessageInterceptor(
-      cast.framework.messages.MessageType.LOAD,
-      function(request) {
-        var streamUrl = request.media.contentId;
-        if (!mpegts.getFeatureList().mseLivePlayback) return request;
-        if (currentPlayer != null) {
+    // Tracking state
+    var currentPlayer = null;
+    var checkReadyInterval = null;
+    var latencyInterval = null;
+    var playStarted = false;
+    var reconnectTimer = null;
+    var lastStreamUrl = '';
+
+    function cleanup() {
+        playStarted = false;
+        if (checkReadyInterval) { clearInterval(checkReadyInterval); checkReadyInterval = null; }
+        if (latencyInterval) { clearInterval(latencyInterval); latencyInterval = null; }
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (currentPlayer) {
             try {
                 currentPlayer.pause();
                 currentPlayer.unload();
@@ -71,8 +53,14 @@
             } catch(e) {}
             currentPlayer = null;
         }
+    }
+
+    function startPlayback(streamUrl) {
+        cleanup();
+        lastStreamUrl = streamUrl;
+
         var videoElement = document.getElementById('tvPlayer');
-        var playStarted = false;
+        if (!mpegts.getFeatureList().mseLivePlayback) return;
 
         var player = mpegts.createPlayer({
             type: 'mse',
@@ -80,39 +68,44 @@
             url: streamUrl
         }, {
             enableStashBuffer: false,
-            stashInitialSize: 256,
+            stashInitialSize: 384,
             lazyLoad: false,
             deferLoadAfterSourceOpen: false,
             autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 10,
-            autoCleanupMinBackwardDuration: 5,
+            autoCleanupMaxBackwardDuration: 8,
+            autoCleanupMinBackwardDuration: 4,
             fixAudioTimestampGap: true,
             liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 2.0,
-            liveBufferLatencyMinRemain: 0.5
+            liveBufferLatencyMaxLatency: 1.5,
+            liveBufferLatencyMinRemain: 0.3
         });
+
         currentPlayer = player;
+
         player.on(mpegts.Events.ERROR, function(e, d, i) {
-            mpegtsErrors.push(e + ':' + d);
+            // Auto-reconnect sau 2 giây
+            if (!reconnectTimer) {
+                reconnectTimer = setTimeout(function() {
+                    reconnectTimer = null;
+                    startPlayback(lastStreamUrl);
+                }, 2000);
+            }
         });
 
         player.attachMediaElement(videoElement);
         player.load();
 
         // Đợi buffer đủ rồi play ở live edge
-        var checkReady = setInterval(function() {
+        checkReadyInterval = setInterval(function() {
             try {
                 var buf = videoElement.buffered;
                 if (buf.length > 0) {
                     var end = buf.end(buf.length - 1);
                     var start = buf.start(0);
-                    if (end - start >= 2) {
-                        clearInterval(checkReady);
-                      if (!isNaN(videoElement.duration)) {
-                        videoElement.currentTime = Math.max(end - 0.5, start);
-                       }
-                      
-                       // ✅ Unmute lại trước khi play (phòng trường hợp bị reset)
+                    if (end - start >= 0.8) {
+                        clearInterval(checkReadyInterval);
+                        checkReadyInterval = null;
+                        videoElement.currentTime = Math.max(end - 0.3, start);
                         videoElement.muted = false;
                         videoElement.volume = 1.0;
                         videoElement.play().catch(function(){});
@@ -123,20 +116,26 @@
             } catch(e) {}
         }, 200);
 
-        // Chỉ xử lý khi lag quá xa, KHÔNG nhảy ngược
-        setInterval(function() {
+        // Latency chasing — nhảy khi lag quá xa
+        latencyInterval = setInterval(function() {
             if (!playStarted) return;
             try {
                 var buf = videoElement.buffered;
                 if (buf.length > 0) {
                     var end = buf.end(buf.length - 1);
-                    if (end - videoElement.currentTime > 5) {
-                        videoElement.currentTime = end - 0.5;
+                    if (end - videoElement.currentTime > 2.5) {
+                        videoElement.currentTime = end - 0.3;
                     }
                 }
             } catch(e) {}
         }, 500);
+    }
 
+    playerManager.setMessageInterceptor(
+      cast.framework.messages.MessageType.LOAD,
+      function(request) {
+        var streamUrl = request.media.contentId;
+        startPlayback(streamUrl);
         return null;
       }
     );
