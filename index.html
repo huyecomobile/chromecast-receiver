@@ -55,13 +55,22 @@
     var playerManager = context.getPlayerManager();
     var mpegtsErrors = [];
     var bgImage = document.getElementById('bgImage');
+    var currentPlayer = null;
 
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
       function(request) {
         var streamUrl = request.media.contentId;
         if (!mpegts.getFeatureList().mseLivePlayback) return request;
-
+        if (currentPlayer != null) {
+            try {
+                currentPlayer.pause();
+                currentPlayer.unload();
+                currentPlayer.detachMediaElement();
+                currentPlayer.destroy();
+            } catch(e) {}
+            currentPlayer = null;
+        }
         var videoElement = document.getElementById('tvPlayer');
         var playStarted = false;
 
@@ -82,7 +91,7 @@
             liveBufferLatencyMaxLatency: 2.0,
             liveBufferLatencyMinRemain: 0.5
         });
-
+        currentPlayer = player;
         player.on(mpegts.Events.ERROR, function(e, d, i) {
             mpegtsErrors.push(e + ':' + d);
         });
@@ -99,7 +108,10 @@
                     var start = buf.start(0);
                     if (end - start >= 2) {
                         clearInterval(checkReady);
+                      if (!isNaN(videoElement.duration)) {
                         videoElement.currentTime = Math.max(end - 0.5, start);
+                       }
+                      
                        // ✅ Unmute lại trước khi play (phòng trường hợp bị reset)
                         videoElement.muted = false;
                         videoElement.volume = 1.0;
