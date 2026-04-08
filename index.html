@@ -106,7 +106,7 @@
                 if (buf.length > 0) {
                     var end = buf.end(buf.length - 1);
                     var start = buf.start(0);
-                    if (end - start >= 2) {
+                    if (end - start >= 2.5) {
                         clearInterval(checkReady);
                       if (!isNaN(videoElement.duration)) {
                         videoElement.currentTime = Math.max(end - 0.5, start);
