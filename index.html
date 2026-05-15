@@ -79,17 +79,18 @@
             isLive: true,
             url: streamUrl
         }, {
-            enableStashBuffer: false,
-            stashInitialSize: 65536,
-            lazyLoad: false,
-            deferLoadAfterSourceOpen: false,
-            autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 10,
-            autoCleanupMinBackwardDuration: 5,
-            fixAudioTimestampGap: true,
-            liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 2.5,
-            liveBufferLatencyMinRemain: 1
+ enableStashBuffer: true,           // ✅ BẬT stash buffer để absorb jitter
+    stashInitialSize: 65536,           // ✅ 64KB — đủ cho ~1-2 TS segments
+    lazyLoad: false,
+    deferLoadAfterSourceOpen: false,
+    autoCleanupSourceBuffer: true,
+    autoCleanupMaxBackwardDuration: 5, // ✅ Giảm từ 10 → 5 (tiết kiệm RAM Chromecast)
+    autoCleanupMinBackwardDuration: 2, // ✅ Giảm từ 5 → 2
+    fixAudioTimestampGap: true,
+    liveBufferLatencyChasing: true,
+    liveBufferLatencyMaxLatency: 3.0,  // ✅ Tăng lên 3s — cho phép buffer dày hơn
+    liveBufferLatencyMinRemain: 1.0,   // ✅ Tăng lên 1s — giữ 1s buffer sau khi chase
+    liveBufferLatencyChasingSpeed: 1.3 // ✅ THÊM MỚI — tăng tốc 1.3x thay vì nhảy cục
         });
         currentPlayer = player;
         player.on(mpegts.Events.ERROR, function(e, d, i) {
@@ -106,7 +107,7 @@
                 if (buf.length > 0) {
                     var end = buf.end(buf.length - 1);
                     var start = buf.start(0);
-                    if (end - start >= 2.5) {
+                    if (end - start >= 3) {
                         clearInterval(checkReady);
                       if (!isNaN(videoElement.duration)) {
                         videoElement.currentTime = Math.max(end - 0.5, start);
@@ -133,7 +134,7 @@
                     }
                 }
             } catch(e) {}
-        }, 500);
+        }, 1000);
 
         return null;
       }
