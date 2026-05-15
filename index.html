@@ -80,7 +80,7 @@
             url: streamUrl
         }, {
             enableStashBuffer: false,
-            stashInitialSize: 256,
+            stashInitialSize: 65536,
             lazyLoad: false,
             deferLoadAfterSourceOpen: false,
             autoCleanupSourceBuffer: true,
@@ -89,7 +89,7 @@
             fixAudioTimestampGap: true,
             liveBufferLatencyChasing: true,
             liveBufferLatencyMaxLatency: 2.5,
-            liveBufferLatencyMinRemain: 0.5
+            liveBufferLatencyMinRemain: 1
         });
         currentPlayer = player;
         player.on(mpegts.Events.ERROR, function(e, d, i) {
