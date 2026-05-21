@@ -1,198 +1,210 @@
 <!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8">
-  <title>CastDuo</title>
-  <script type="text/javascript" src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
-  <style>
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
+   <head>
+      <meta charset="utf-8" />
+      <title>CastDuo</title>
+      <script
+         type="text/javascript"
+         src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"
+      ></script>
+      <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
+      <style>
+         body,
+         html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            overflow: hidden;
+         }
+         /* Ảnh nền hiển thị khi chưa play video */
+         #bgImage {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 1;
+            transition: opacity 0.8s ease;
+         }
+         #bgImage.hidden {
+            opacity: 0;
+            pointer-events: none;
+         }
+         #tvPlayer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 9999;
+            background: transparent;
+         }
+         #debug {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #0f0;
+            font-size: 24px;
+            z-index: 99999;
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            white-space: pre;
+         }
+      </style>
+   </head>
+   <body>
+      <!-- Ảnh nền hiển thị khi idle -->
+      <img
+         id="bgImage"
+         src="https://iconchangerstorage.ecomobileapp.com/static/storage/huy/Congratulation.png"
+         alt="EcoMirror Background"
+      />
+      <video id="tvPlayer"></video>
+      <script>
+         var context = cast.framework.CastReceiverContext.getInstance();
 
-    #bgImage {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      object-fit: cover;
-      z-index: 1;
-      transition: opacity 0.8s ease;
-    }
-    #bgImage.hidden {
-      opacity: 0;
-      pointer-events: none;
-    }
+         var playerManager = context.getPlayerManager();
 
-    /* Container cắt phần thừa */
-    #videoContainer {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      overflow: hidden;
-      z-index: 9999;
-    }
+         var mpegtsErrors = [];
 
-    /* Video: KHÔNG dùng object-fit, JS sẽ set kích thước pixel trực tiếp */
-    #tvPlayer {
-      position: absolute;
-      background: transparent;
-    }
-  </style>
-</head>
-<body>
-  <img id="bgImage" src="https://iconchangerstorage.ecomobileapp.com/static/storage/huy/Congratulation.png" alt="EcoMirror Background" />
+         var bgImage = document.getElementById("bgImage");
 
-  <div id="videoContainer">
-    <video id="tvPlayer"></video>
-  </div>
+         var currentPlayer = null;
 
-  <script>
-    var context = cast.framework.CastReceiverContext.getInstance();
-    var playerManager = context.getPlayerManager();
-    var mpegtsErrors = [];
-    var bgImage = document.getElementById('bgImage');
-    var currentPlayer = null;
+         playerManager.setMessageInterceptor(
+            cast.framework.messages.MessageType.LOAD,
 
-    /**
-     * Center-crop bằng pixel thuần — không phụ thuộc object-fit hay CSS transform
-     * Tính scale lớn nhất để video fill toàn bộ TV, sau đó căn giữa bằng top/left pixel
-     */
-    function applyCenterCrop(videoElement) {
-      var screenW = window.innerWidth || document.documentElement.clientWidth || 1920;
-      var screenH = window.innerHeight || document.documentElement.clientHeight || 1080;
-      var videoW = videoElement.videoWidth;
-      var videoH = videoElement.videoHeight;
+            function (request) {
+               var streamUrl = request.media.contentId;
 
-      if (!videoW || !videoH) return;
+               if (!mpegts.getFeatureList().mseLivePlayback) return request;
 
-      // Scale lớn hơn → fill toàn bộ màn hình, phần thừa bị crop
-      var scaleX = screenW / videoW;
-      var scaleY = screenH / videoH;
-      var scale = Math.max(scaleX, scaleY);
+               if (currentPlayer != null) {
+                  try {
+                     currentPlayer.pause();
 
-      var newW = Math.ceil(videoW * scale);
-      var newH = Math.ceil(videoH * scale);
+                     currentPlayer.unload();
 
-      // Căn giữa: offset âm nếu video lớn hơn màn hình
-      var offsetX = Math.floor((screenW - newW) / 2);
-      var offsetY = Math.floor((screenH - newH) / 2);
+                     currentPlayer.detachMediaElement();
 
-      videoElement.style.width = newW + 'px';
-      videoElement.style.height = newH + 'px';
-      videoElement.style.left = offsetX + 'px';
-      videoElement.style.top = offsetY + 'px';
-    }
+                     currentPlayer.destroy();
+                  } catch (e) {}
 
-    playerManager.setMessageInterceptor(
-      cast.framework.messages.MessageType.LOAD,
-      function(request) {
-        var streamUrl = request.media.contentId;
-        if (!mpegts.getFeatureList().mseLivePlayback) return request;
-        if (currentPlayer != null) {
-            try {
-                currentPlayer.pause();
-                currentPlayer.unload();
-                currentPlayer.detachMediaElement();
-                currentPlayer.destroy();
-            } catch(e) {}
-            currentPlayer = null;
-        }
-        var videoElement = document.getElementById('tvPlayer');
-        var playStarted = false;
+                  currentPlayer = null;
+               }
 
-        // Reset kích thước
-        videoElement.style.width = '';
-        videoElement.style.height = '';
-        videoElement.style.left = '';
-        videoElement.style.top = '';
-        videoElement.removeAttribute('width');
-        videoElement.removeAttribute('height');
+               var videoElement = document.getElementById("tvPlayer");
 
-        var player = mpegts.createPlayer({
-            type: 'mse',
-            isLive: true,
-            url: streamUrl
-        }, {
-            enableStashBuffer: true,
-            stashInitialSize: 65536,
-            lazyLoad: false,
-            deferLoadAfterSourceOpen: false,
-            autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 5,
-            autoCleanupMinBackwardDuration: 2,
-            fixAudioTimestampGap: true,
-            liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 3.0,
-            liveBufferLatencyMinRemain: 1.0,
-            liveBufferLatencyChasingSpeed: 1.3
-        });
-        currentPlayer = player;
-        player.on(mpegts.Events.ERROR, function(e, d, i) {
-            mpegtsErrors.push(e + ':' + d);
-        });
+               var playStarted = false;
 
-        player.attachMediaElement(videoElement);
-        player.load();
+               var player = mpegts.createPlayer(
+                  {
+                     type: "mse",
 
-        // Khi biết kích thước video thực tế → apply center crop
-        videoElement.addEventListener('loadedmetadata', function onMeta() {
-          videoElement.removeEventListener('loadedmetadata', onMeta);
-          applyCenterCrop(videoElement);
-        });
+                     isLive: true,
 
-        // Fallback: thử lại khi có frame đầu tiên (một số stream metadata đến muộn)
-        videoElement.addEventListener('loadeddata', function onData() {
-          videoElement.removeEventListener('loadeddata', onData);
-          applyCenterCrop(videoElement);
-        });
+                     url: streamUrl,
+                  },
+                  {
+                     enableStashBuffer: true, // ✅ BẬT stash buffer để absorb jitter
 
-        // Cập nhật khi resize
-        window.addEventListener('resize', function() {
-          applyCenterCrop(videoElement);
-        });
+                     stashInitialSize: 65536, // ✅ 64KB — đủ cho ~1-2 TS segments
 
-        // Đợi buffer đủ rồi play ở live edge
-        var checkReady = setInterval(function() {
-            try {
-                var buf = videoElement.buffered;
-                if (buf.length > 0) {
-                    var end = buf.end(buf.length - 1);
-                    var start = buf.start(0);
-                    if (end - start >= 3) {
-                        clearInterval(checkReady);
-                        if (!isNaN(videoElement.duration)) {
-                          videoElement.currentTime = Math.max(end - 0.5, start);
+                     lazyLoad: false,
+
+                     deferLoadAfterSourceOpen: false,
+
+                     autoCleanupSourceBuffer: true,
+
+                     autoCleanupMaxBackwardDuration: 5, // ✅ Giảm từ 10 → 5 (tiết kiệm RAM Chromecast)
+
+                     autoCleanupMinBackwardDuration: 2, // ✅ Giảm từ 5 → 2
+
+                     fixAudioTimestampGap: true,
+
+                     liveBufferLatencyChasing: true,
+
+                     liveBufferLatencyMaxLatency: 3.0, // ✅ Tăng lên 3s — cho phép buffer dày hơn
+
+                     liveBufferLatencyMinRemain: 1.0, // ✅ Tăng lên 1s — giữ 1s buffer sau khi chase
+
+                     liveBufferLatencyChasingSpeed: 1.3, // ✅ THÊM MỚI — tăng tốc 1.3x thay vì nhảy cục
+                  },
+               );
+
+               currentPlayer = player;
+
+               player.on(mpegts.Events.ERROR, function (e, d, i) {
+                  mpegtsErrors.push(e + ":" + d);
+               });
+
+               player.attachMediaElement(videoElement);
+
+               player.load();
+
+               // Đợi buffer đủ rồi play ở live edge
+
+               var checkReady = setInterval(function () {
+                  try {
+                     var buf = videoElement.buffered;
+
+                     if (buf.length > 0) {
+                        var end = buf.end(buf.length - 1);
+
+                        var start = buf.start(0);
+
+                        if (end - start >= 3) {
+                           clearInterval(checkReady);
+
+                           if (!isNaN(videoElement.duration)) {
+                              videoElement.currentTime = Math.max(
+                                 end - 0.5,
+                                 start,
+                              );
+                           }
+
+                           videoElement.muted = false;
+
+                           videoElement.volume = 1.0;
+
+                           videoElement.play().catch(function () {});
+
+                           playStarted = true;
+
+                           bgImage.classList.add("hidden");
                         }
-                        videoElement.muted = false;
-                        videoElement.volume = 1.0;
-                        videoElement.play().catch(function(){});
-                        playStarted = true;
-                        bgImage.classList.add('hidden');
+                     }
+                  } catch (e) {}
+               }, 200);
 
-                        // Apply lại sau play (đảm bảo videoWidth/Height có sẵn)
-                        applyCenterCrop(videoElement);
-                    }
-                }
-            } catch(e) {}
-        }, 200);
+               // Chỉ xử lý khi lag quá xa, KHÔNG nhảy ngược
 
-        // Chỉ xử lý khi lag quá xa
-        setInterval(function() {
-            if (!playStarted) return;
-            try {
-                var buf = videoElement.buffered;
-                if (buf.length > 0) {
-                    var end = buf.end(buf.length - 1);
-                    if (end - videoElement.currentTime > 5) {
-                        videoElement.currentTime = end - 0.5;
-                    }
-                }
-            } catch(e) {}
-        }, 1000);
+               setInterval(function () {
+                  if (!playStarted) return;
 
-        return null;
-      }
-    );
+                  try {
+                     var buf = videoElement.buffered;
 
-    context.start({ disableIdleTimeout: true });
-  </script>
-</body>
+                     if (buf.length > 0) {
+                        var end = buf.end(buf.length - 1);
+
+                        if (end - videoElement.currentTime > 5) {
+                           videoElement.currentTime = end - 0.5;
+                        }
+                     }
+                  } catch (e) {}
+               }, 1000);
+
+               return null;
+            },
+         );
+
+         context.start({ disableIdleTimeout: true });
+      </script>
+   </body>
 </html>
