@@ -8,7 +8,6 @@
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
 
-    /* Ảnh nền hiển thị khi chưa play video */
     #bgImage {
       position: absolute;
       top: 0; left: 0;
@@ -22,7 +21,7 @@
       pointer-events: none;
     }
 
-    /* Container center-crop: overflow hidden để cắt phần thừa */
+    /* Container cắt phần thừa */
     #videoContainer {
       position: absolute;
       top: 0; left: 0;
@@ -31,20 +30,14 @@
       z-index: 9999;
     }
 
-    /* Video: center-crop via transform — fallback cho mọi Chromecast */
+    /* Video: KHÔNG dùng object-fit, JS sẽ set kích thước pixel trực tiếp */
     #tvPlayer {
       position: absolute;
-      top: 50%; left: 50%;
-      min-width: 100%; min-height: 100%;
-      transform: translate(-50%, -50%);
       background: transparent;
-      /* object-fit: cover vẫn giữ cho browser hỗ trợ */
-      object-fit: cover;
     }
   </style>
 </head>
 <body>
-  <!-- Ảnh nền hiển thị khi idle -->
   <img id="bgImage" src="https://iconchangerstorage.ecomobileapp.com/static/storage/huy/Congratulation.png" alt="EcoMirror Background" />
 
   <div id="videoContainer">
@@ -59,29 +52,33 @@
     var currentPlayer = null;
 
     /**
-     * Center-crop: tính toán scale để video fill toàn bộ container
-     * Khi video có tỷ lệ khác TV (ví dụ 9:16 phone → 16:9 TV),
-     * video sẽ được scale up và căn giữa, phần thừa bị crop bởi overflow:hidden
+     * Center-crop bằng pixel thuần — không phụ thuộc object-fit hay CSS transform
+     * Tính scale lớn nhất để video fill toàn bộ TV, sau đó căn giữa bằng top/left pixel
      */
     function applyCenterCrop(videoElement) {
-      var screenW = window.innerWidth;
-      var screenH = window.innerHeight;
+      var screenW = window.innerWidth || document.documentElement.clientWidth || 1920;
+      var screenH = window.innerHeight || document.documentElement.clientHeight || 1080;
       var videoW = videoElement.videoWidth;
       var videoH = videoElement.videoHeight;
 
       if (!videoW || !videoH) return;
 
-      // Tính scale để video cover toàn bộ màn hình
+      // Scale lớn hơn → fill toàn bộ màn hình, phần thừa bị crop
       var scaleX = screenW / videoW;
       var scaleY = screenH / videoH;
-      var scale = Math.max(scaleX, scaleY); // Lấy scale lớn hơn → fill toàn bộ
+      var scale = Math.max(scaleX, scaleY);
 
-      var newW = videoW * scale;
-      var newH = videoH * scale;
+      var newW = Math.ceil(videoW * scale);
+      var newH = Math.ceil(videoH * scale);
+
+      // Căn giữa: offset âm nếu video lớn hơn màn hình
+      var offsetX = Math.floor((screenW - newW) / 2);
+      var offsetY = Math.floor((screenH - newH) / 2);
 
       videoElement.style.width = newW + 'px';
       videoElement.style.height = newH + 'px';
-      // top/left 50% + translate(-50%, -50%) đã căn giữa
+      videoElement.style.left = offsetX + 'px';
+      videoElement.style.top = offsetY + 'px';
     }
 
     playerManager.setMessageInterceptor(
@@ -101,9 +98,13 @@
         var videoElement = document.getElementById('tvPlayer');
         var playStarted = false;
 
-        // Reset kích thước khi load stream mới
+        // Reset kích thước
         videoElement.style.width = '';
         videoElement.style.height = '';
+        videoElement.style.left = '';
+        videoElement.style.top = '';
+        videoElement.removeAttribute('width');
+        videoElement.removeAttribute('height');
 
         var player = mpegts.createPlayer({
             type: 'mse',
@@ -131,12 +132,19 @@
         player.attachMediaElement(videoElement);
         player.load();
 
-        // Khi có metadata (biết videoWidth/videoHeight) → apply center crop
-        videoElement.addEventListener('loadedmetadata', function() {
+        // Khi biết kích thước video thực tế → apply center crop
+        videoElement.addEventListener('loadedmetadata', function onMeta() {
+          videoElement.removeEventListener('loadedmetadata', onMeta);
           applyCenterCrop(videoElement);
         });
 
-        // Cập nhật lại khi resize (hiếm trên Chromecast nhưng an toàn)
+        // Fallback: thử lại khi có frame đầu tiên (một số stream metadata đến muộn)
+        videoElement.addEventListener('loadeddata', function onData() {
+          videoElement.removeEventListener('loadeddata', onData);
+          applyCenterCrop(videoElement);
+        });
+
+        // Cập nhật khi resize
         window.addEventListener('resize', function() {
           applyCenterCrop(videoElement);
         });
@@ -159,14 +167,14 @@
                         playStarted = true;
                         bgImage.classList.add('hidden');
 
-                        // Apply center crop lại sau khi play (đảm bảo videoWidth/Height có sẵn)
+                        // Apply lại sau play (đảm bảo videoWidth/Height có sẵn)
                         applyCenterCrop(videoElement);
                     }
                 }
             } catch(e) {}
         }, 200);
 
-        // Chỉ xử lý khi lag quá xa, KHÔNG nhảy ngược
+        // Chỉ xử lý khi lag quá xa
         setInterval(function() {
             if (!playStarted) return;
             try {
