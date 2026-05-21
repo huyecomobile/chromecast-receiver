@@ -22,25 +22,24 @@
       pointer-events: none;
     }
 
-    #tvPlayer {
+    /* Container center-crop: overflow hidden để cắt phần thừa */
+    #videoContainer {
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
-      object-fit: cover;
+      overflow: hidden;
       z-index: 9999;
-      background: transparent;
     }
 
-    #debug {
+    /* Video: center-crop via transform — fallback cho mọi Chromecast */
+    #tvPlayer {
       position: absolute;
-      top: 10px; left: 10px;
-      color: #0f0;
-      font-size: 24px;
-      z-index: 99999;
-      font-family: monospace;
-      background: rgba(0,0,0,0.8);
-      padding: 15px;
-      white-space: pre;
+      top: 50%; left: 50%;
+      min-width: 100%; min-height: 100%;
+      transform: translate(-50%, -50%);
+      background: transparent;
+      /* object-fit: cover vẫn giữ cho browser hỗ trợ */
+      object-fit: cover;
     }
   </style>
 </head>
@@ -48,7 +47,9 @@
   <!-- Ảnh nền hiển thị khi idle -->
   <img id="bgImage" src="https://iconchangerstorage.ecomobileapp.com/static/storage/huy/Congratulation.png" alt="EcoMirror Background" />
 
-  <video id="tvPlayer"></video>
+  <div id="videoContainer">
+    <video id="tvPlayer"></video>
+  </div>
 
   <script>
     var context = cast.framework.CastReceiverContext.getInstance();
@@ -56,6 +57,32 @@
     var mpegtsErrors = [];
     var bgImage = document.getElementById('bgImage');
     var currentPlayer = null;
+
+    /**
+     * Center-crop: tính toán scale để video fill toàn bộ container
+     * Khi video có tỷ lệ khác TV (ví dụ 9:16 phone → 16:9 TV),
+     * video sẽ được scale up và căn giữa, phần thừa bị crop bởi overflow:hidden
+     */
+    function applyCenterCrop(videoElement) {
+      var screenW = window.innerWidth;
+      var screenH = window.innerHeight;
+      var videoW = videoElement.videoWidth;
+      var videoH = videoElement.videoHeight;
+
+      if (!videoW || !videoH) return;
+
+      // Tính scale để video cover toàn bộ màn hình
+      var scaleX = screenW / videoW;
+      var scaleY = screenH / videoH;
+      var scale = Math.max(scaleX, scaleY); // Lấy scale lớn hơn → fill toàn bộ
+
+      var newW = videoW * scale;
+      var newH = videoH * scale;
+
+      videoElement.style.width = newW + 'px';
+      videoElement.style.height = newH + 'px';
+      // top/left 50% + translate(-50%, -50%) đã căn giữa
+    }
 
     playerManager.setMessageInterceptor(
       cast.framework.messages.MessageType.LOAD,
@@ -74,23 +101,27 @@
         var videoElement = document.getElementById('tvPlayer');
         var playStarted = false;
 
+        // Reset kích thước khi load stream mới
+        videoElement.style.width = '';
+        videoElement.style.height = '';
+
         var player = mpegts.createPlayer({
             type: 'mse',
             isLive: true,
             url: streamUrl
         }, {
- enableStashBuffer: true,           // ✅ BẬT stash buffer để absorb jitter
-    stashInitialSize: 65536,           // ✅ 64KB — đủ cho ~1-2 TS segments
-    lazyLoad: false,
-    deferLoadAfterSourceOpen: false,
-    autoCleanupSourceBuffer: true,
-    autoCleanupMaxBackwardDuration: 5, // ✅ Giảm từ 10 → 5 (tiết kiệm RAM Chromecast)
-    autoCleanupMinBackwardDuration: 2, // ✅ Giảm từ 5 → 2
-    fixAudioTimestampGap: true,
-    liveBufferLatencyChasing: true,
-    liveBufferLatencyMaxLatency: 3.0,  // ✅ Tăng lên 3s — cho phép buffer dày hơn
-    liveBufferLatencyMinRemain: 1.0,   // ✅ Tăng lên 1s — giữ 1s buffer sau khi chase
-    liveBufferLatencyChasingSpeed: 1.3 // ✅ THÊM MỚI — tăng tốc 1.3x thay vì nhảy cục
+            enableStashBuffer: true,
+            stashInitialSize: 65536,
+            lazyLoad: false,
+            deferLoadAfterSourceOpen: false,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 5,
+            autoCleanupMinBackwardDuration: 2,
+            fixAudioTimestampGap: true,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 3.0,
+            liveBufferLatencyMinRemain: 1.0,
+            liveBufferLatencyChasingSpeed: 1.3
         });
         currentPlayer = player;
         player.on(mpegts.Events.ERROR, function(e, d, i) {
@@ -99,6 +130,16 @@
 
         player.attachMediaElement(videoElement);
         player.load();
+
+        // Khi có metadata (biết videoWidth/videoHeight) → apply center crop
+        videoElement.addEventListener('loadedmetadata', function() {
+          applyCenterCrop(videoElement);
+        });
+
+        // Cập nhật lại khi resize (hiếm trên Chromecast nhưng an toàn)
+        window.addEventListener('resize', function() {
+          applyCenterCrop(videoElement);
+        });
 
         // Đợi buffer đủ rồi play ở live edge
         var checkReady = setInterval(function() {
@@ -109,14 +150,17 @@
                     var start = buf.start(0);
                     if (end - start >= 3) {
                         clearInterval(checkReady);
-                      if (!isNaN(videoElement.duration)) {
-                        videoElement.currentTime = Math.max(end - 0.5, start);
-                      }
+                        if (!isNaN(videoElement.duration)) {
+                          videoElement.currentTime = Math.max(end - 0.5, start);
+                        }
                         videoElement.muted = false;
                         videoElement.volume = 1.0;
                         videoElement.play().catch(function(){});
                         playStarted = true;
                         bgImage.classList.add('hidden');
+
+                        // Apply center crop lại sau khi play (đảm bảo videoWidth/Height có sẵn)
+                        applyCenterCrop(videoElement);
                     }
                 }
             } catch(e) {}
