@@ -79,9 +79,46 @@
          .hideDebug {
             display: none !important;
          }
+         /* Chế độ chẩn đoán: chừa vùng riêng, tránh phụ thuộc overlay trên video của TV. */
+         body.diagnostic #tvPlayer,
+         body.diagnostic #bgImage {
+            left: 4vw;
+            top: 8vh;
+            width: 64vw;
+            height: 60vh;
+            object-fit: contain;
+         }
+         body.diagnostic #stats {
+            left: auto;
+            right: 4vw;
+            top: 8vh;
+            width: 25vw;
+            max-width: 25vw;
+            font-size: 18px;
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+         }
+         body.diagnostic #debug {
+            left: 4vw;
+            right: 4vw;
+            bottom: 5vh;
+            max-height: 23vh;
+            font-size: 18px;
+         }
+         #receiverBuild {
+            position: absolute;
+            top: 3vh;
+            left: 4vw;
+            z-index: 100000;
+            color: #fff;
+            background: #843000;
+            padding: 6px 12px;
+            font: bold 20px monospace;
+         }
       </style>
    </head>
-   <body>
+   <body class="diagnostic">
+      <div id="receiverBuild">CASTDUO DEBUG A-20260922-02</div>
       <!-- Ảnh nền hiển thị khi idle -->
       <img
          id="bgImage"
@@ -91,8 +128,8 @@
       <video id="tvPlayer"></video>
 
       <!-- A1: hai vùng chẩn đoán — #stats là số liệu cập nhật liên tục, #debug là log sự kiện -->
-      <div id="stats"></div>
-      <div id="debug"></div>
+      <div id="stats">Đang khởi tạo JavaScript…</div>
+      <div id="debug">Đã tải HTML A-20260922-02. Chờ receiver khởi động…</div>
 
       <script>
          /* =========================================================================
@@ -122,6 +159,8 @@
          var MAX_LOG_LINES = 20;
 
          if (!CONFIG.DEBUG_OVERLAY) {
+            document.body.className = "";
+            document.getElementById("receiverBuild").className = "hideDebug";
             statsEl.className = "hideDebug";
             debugEl.className = "hideDebug";
          }
@@ -218,6 +257,7 @@
             } catch (e) { log("⚠️ device capabilities: " + e); }
          }
 
+         log("HTML A-20260922-02 | URL=" + window.location.href);
          var context = cast.framework.CastReceiverContext.getInstance();
          var playerManager = context.getPlayerManager();
          var bgImage = document.getElementById("bgImage");
