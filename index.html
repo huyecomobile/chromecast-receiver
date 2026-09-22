@@ -49,8 +49,6 @@
    var video = document.getElementById("tvPlayer");
    var background = document.getElementById("bgImage");
    var currentPlayer = null;
-   var readyTimer = null;
-   var startBufferSec = 0.4;
    var liveEdgeOffset = 0.3;
 
    if (!window.cast || !cast.framework) return;
@@ -62,8 +60,6 @@
    var manager = context.getPlayerManager();
 
    function stopPlayer() {
-      clearInterval(readyTimer);
-      readyTimer = null;
       var previous = currentPlayer;
       currentPlayer = null;
       if (previous) {
@@ -134,31 +130,20 @@
       // load() có thể phát lỗi đồng bộ qua event.
       if (currentPlayer !== player) return null;
 
-      readyTimer = setInterval(function () {
-         if (currentPlayer !== player) return;
-         try {
-            var ranges = video.buffered;
-            if (!ranges.length) return;
-            var last = ranges.length - 1;
-            var start = ranges.start(last);
-            var end = ranges.end(last);
-            if (end - start < startBufferSec) return;
-
-            // Không phụ thuộc duration; chỉ seek bên trong range cuối.
-            video.currentTime = Math.max(start, end - liveEdgeOffset);
-            clearInterval(readyTimer);
-            readyTimer = null;
-            video.muted = false;
-            video.volume = 1;
-            Promise.resolve(video.play()).then(function () {
-               if (currentPlayer === player) background.classList.add("hidden");
-            }, function () {
-               stopIfCurrent(player);
-            });
-         } catch (error) {
+      // Gọi play ngay sau load; trình duyệt phát khi khung đầu giải mã được.
+      // mpegts.js StartupStallJumper tự xử lý timestamp bắt đầu khác 0.
+      // Không seek tới live edge trước khung đầu và không đợi đủ 0.4s buffer.
+      video.muted = false;
+      video.volume = 1;
+      try {
+         Promise.resolve(video.play()).then(function () {
+            if (currentPlayer === player) background.classList.add("hidden");
+         }, function () {
             stopIfCurrent(player);
-         }
-      }, 100);
+         });
+      } catch (error) {
+         stopIfCurrent(player);
+      }
       return null;
    });
 
