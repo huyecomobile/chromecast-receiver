@@ -7,7 +7,6 @@
          type="text/javascript"
          src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"
       ></script>
-      <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
       <style>
          body,
          html {
@@ -82,6 +81,8 @@
    <body>
       <img
          id="bgImage"
+         fetchpriority="low"
+         decoding="async"
          src="https://firebasestorage.googleapis.com/v0/b/screen-mirroring-49598.firebasestorage.app/o/chrome_success%2FCongratulation.webp?alt=media&token=a5d7ce4c-1915-4528-af5e-99e319a792ba"
          alt="EcoMirror Background"
       />
@@ -103,6 +104,9 @@
           * KHÔNG cần deploy lại receiver.
           * ========================================================================= */
          var RECEIVER_VERSION = "2026-09-23";
+         // Mốc để đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
+         // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
+         var T_BOOT = Date.now();
 
          var CONFIG = {
             // Overlay chẩn đoán (số liệu + log lỗi). TẮT ở bản phát hành; bật lại khi cần truy
@@ -469,8 +473,37 @@
          /* ==================== Đường MPEG-TS (mpegts.js) ==================== */
 
          var currentPlayer = null;
+         var MPEGTS_URL = "https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js";
+
+         /**
+          * 🔴 mpegts.js (**267 KB**) từng là `<script>` đồng bộ trong `<head>`, tức receiver không
+          * chạy được dòng nào cho tới khi tải xong — kể cả khi luồng là fMP4 và thư viện này
+          * KHÔNG bao giờ được đụng tới. Cùng với Cast SDK (356 KB) và ảnh nền (649 KB), đó là
+          * ~1,27 MB nằm chắn trên đường tới khung hình đầu tiên.
+          *
+          * Nay chỉ nạp khi thật sự rơi vào đường MPEG-TS. Đổi lại đường đó tốn thêm một lượt
+          * tải — chấp nhận được, vì nó là đường lui chứ không phải đường chính.
+          */
+         function withMpegts(onReady) {
+            if (window.mpegts) { onReady(); return; }
+            var t0 = Date.now();
+            var el = document.createElement("script");
+            el.src = MPEGTS_URL;
+            el.onload = function () {
+               log("đã nạp mpegts.js (" + (Date.now() - t0) + "ms)");
+               onReady();
+            };
+            el.onerror = function () {
+               log("🔴 KHÔNG nạp được mpegts.js — đường MPEG-TS không dùng được");
+            };
+            document.head.appendChild(el);
+         }
 
          function startMpegTs(url, videoElement) {
+            withMpegts(function () { startMpegTsReal(url, videoElement); });
+         }
+
+         function startMpegTsReal(url, videoElement) {
             mode = "MPEG-TS/mpegts.js";
             if (!mpegts.getFeatureList().mseLivePlayback) {
                log("🔴 THIẾT BỊ KHÔNG HỖ TRỢ MSE LIVE PLAYBACK — mpegts.js không chạy được");
@@ -546,7 +579,9 @@
                   videoElement.volume = 1.0;
                   videoElement.play().then(
                      function () {
-                        log("▶️ PLAY [" + mode + "] buffer=" + (end - start).toFixed(2) + "s seek→" + target.toFixed(2));
+                        log("▶️ PLAY [" + mode + "] buffer=" + (end - start).toFixed(2) +
+                            "s seek→" + target.toFixed(2) +
+                            "  | tới khung đầu: " + (Date.now() - T_BOOT) + "ms");
                      },
                      function (e) { log("🔴 play() từ chối: " + e); },
                   );
@@ -583,7 +618,7 @@
             cast.framework.messages.MessageType.LOAD,
             function (request) {
                var url = request.media.contentId;
-               log("LOAD ⇒ " + url);
+               log("LOAD ⇒ " + url + "  (+" + (Date.now() - T_BOOT) + "ms từ lúc receiver chạy)");
                log("LOAD meta: type=" + request.media.contentType +
                    " streamType=" + request.media.streamType +
                    " duration=" + request.media.duration);
