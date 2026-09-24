@@ -146,7 +146,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-09-24";
+            var RECEIVER_VERSION = "2026-09-24b";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -402,21 +402,35 @@
              */
 
             var FMP4_CONFIG = {
+               // 🔴 24/09/2026 — đổi ưu tiên: MƯỢT trước, TRỄ sau.
+               //
+               // Bản trước giữ đệm 0,15s và nhảy thẳng về live edge khi trễ quá 0,9s — độ trễ đo
+               // được rất đẹp (0,4–0,7s) nhưng đổi lại là "thi thoảng giật một cái": một cú xóc
+               // Wi-Fi 100–300ms là đủ làm cạn 0,15s đệm (hình đứng một nhịp), và một cú dài hơn
+               // là đủ đẩy trễ qua 0,9s (hình nhảy cóc). Hai cú đó là hai kiểu giật khác nhau.
+               //
+               // Nay đệm 0,3s để nuốt trọn cú xóc thường gặp, và chỉ nhảy khi trễ quá 1,5s — giữa
+               // đó thì ĐUỔI bằng tốc độ phát, hai nấc. Giá: trễ ổn định tăng ~150ms.
+               //
                // 🔴 `chaseLag` QUYẾT ĐỊNH độ trễ ở trạng thái ổn định, không phải `liveEdgeOffset`.
                // Vòng đuổi chỉ can thiệp khi lag vượt ngưỡng này, nên lag thực tế luôn trôi lên và
-               // **đứng quanh đúng `chaseLag`**.
+               // đứng quanh khoảng `chaseLag − chaseHysteresis` … `chaseLag`.
                //
-               // Sàn an toàn gắn với độ dài fragment: fMP4 hiện ~66ms (`-frag_duration 60000`), cần
-               // 2–3 fragment trong buffer để không underrun ⇒ ~0,2s. Đổi `frag_duration` phía app
-               // thì phải chỉnh lại các ngưỡng này theo. Những con số này CHỈ đúng cho fMP4 —
-               // đây chính là chỗ bản 23/09 đem áp nhầm cho MPEG-TS và làm chết luồng TS.
-               startBufferSec: 0.15, // ≈2 fragment
-               liveEdgeOffset: 0.15, // khoảng cách tới live edge khi seek
-               chaseLag: 0.35,       // lag > ngưỡng này ⇒ tăng tốc đuổi
-               chaseRate: 1.15,      // 1.08 kéo 1,0s về 0,35s mất ~8 giây — quá chậm
-               hardSeekLag: 0.9,     // lag > ngưỡng này ⇒ nhảy thẳng. Mirror chịu được một cú giật
-                                     // hơn là chịu 1 giây trễ kéo dài
-               maxBackBufferSec: 3,  // giữ tối đa bao nhiêu giây phía sau currentTime
+               // Những con số này CHỈ đúng cho fMP4 (fragment ~100ms, `-frag_duration 100000`) —
+               // đây chính là chỗ bản 23/09 đem áp nhầm cho MPEG-TS và làm chết luồng TS. Đổi
+               // `frag_duration` phía app thì phải chỉnh lại theo.
+               startBufferSec: 0.3,   // PHẢI bằng liveEdgeOffset: thấp hơn thì đệm lúc mới lên
+                                      // hình vẫn mỏng như cũ, chỉ dày sau cú nhảy đầu tiên
+               liveEdgeOffset: 0.3,   // khoảng cách tới live edge khi mở và khi nhảy
+               chaseLag: 0.5,         // lag > ngưỡng này ⇒ bắt đầu đuổi
+               chaseHysteresis: 0.1,  // chỉ về ×1 khi lag < chaseLag − 0,1 — không thì tốc độ bật
+                                      // qua bật lại mỗi 500ms ở sát ngưỡng, bản thân nó là giật
+               chaseRate: 1.15,       // nấc 1: 1.08 kéo 1,0s về 0,35s mất ~8 giây — quá chậm
+               fastChaseLag: 0.8,     // lag > ngưỡng này ⇒ nấc 2
+               fastChaseRate: 1.25,   // nấc 2: kéo 0,5s về trong ~2 giây, thay cho một cú nhảy
+               hardSeekLag: 1.5,      // chỉ khi trễ quá ngần này mới nhảy thẳng — lúc đó đuổi
+                                      // bằng tốc độ sẽ mất quá lâu
+               maxBackBufferSec: 3,   // giữ tối đa bao nhiêu giây phía sau currentTime
             };
 
             var fmp4 = null;
@@ -780,19 +794,29 @@
                      if (buf.length === 0) return;
                      var end = buf.end(buf.length - 1);
                      var lag = end - video.currentTime;
-                     if (lag > FMP4_CONFIG.hardSeekLag) {
-                        video.currentTime = end - FMP4_CONFIG.liveEdgeOffset;
-                        video.playbackRate = 1.0;
+                     var C = FMP4_CONFIG;
+                     if (lag > C.hardSeekLag) {
+                        video.currentTime = end - C.liveEdgeOffset;
+                        setFmp4Rate(1.0, lag);
                         log("⏩ lag " + lag.toFixed(2) + "s ⇒ nhảy live edge");
-                     } else if (lag > FMP4_CONFIG.chaseLag) {
-                        if (video.playbackRate !== FMP4_CONFIG.chaseRate) {
-                           video.playbackRate = FMP4_CONFIG.chaseRate;
-                        }
-                     } else if (video.playbackRate !== 1.0) {
-                        video.playbackRate = 1.0;
+                     } else if (lag > C.fastChaseLag) {
+                        setFmp4Rate(C.fastChaseRate, lag);
+                     } else if (lag > C.chaseLag) {
+                        setFmp4Rate(C.chaseRate, lag);
+                     } else if (lag < C.chaseLag - C.chaseHysteresis) {
+                        setFmp4Rate(1.0, lag);
                      }
+                     // Trong dải (chaseLag − chaseHysteresis, chaseLag]: GIỮ tốc độ hiện tại. Đang
+                     // đuổi thì đuổi nốt cho qua hẳn dải; đang ×1 thì chưa đủ lý do để đuổi.
                   } catch (e) {}
                }, 500);
+            }
+
+            /** Đổi tốc độ phát của nhánh fMP4 — chỉ khi khác, và ghi log để đối chiếu với lúc giật. */
+            function setFmp4Rate(rate, lag) {
+               if (video.playbackRate === rate) return;
+               video.playbackRate = rate;
+               log("tốc độ ×" + rate + " (lag " + lag.toFixed(2) + "s)");
             }
 
             function stopFmp4() {
