@@ -1,154 +1,967 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-   <meta charset="utf-8">
-   <meta name="viewport" content="width=device-width, initial-scale=1">
-   <title>CastDuo</title>
-   <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
-   <style>
-      html, body {
-         margin: 0;
-         padding: 0;
-         width: 100%;
-         height: 100%;
-         overflow: hidden;
-         background: #000;
-      }
-      #bgImage, #tvPlayer {
-         position: absolute;
-         top: 0;
-         left: 0;
-         width: 100%;
-         height: 100%;
-      }
-      #bgImage {
-         object-fit: cover;
-         z-index: 1;
-         transition: opacity 0.3s ease;
-      }
-      #bgImage.hidden { opacity: 0; }
-      #tvPlayer {
-         object-fit: contain;
-         z-index: 2;
-         background: transparent;
-      }
-   </style>
-</head>
-<body>
-<img
+   <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>CastDuo</title>
+      <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+      <!--
+         mpegts.js (267 KB) — `defer` là có chủ ý, KHÔNG phải tối ưu vặt.
+
+         · Đồng bộ như bản cũ ⇒ receiver không chạy nổi một dòng nào cho tới khi tải xong, kể cả
+           khi luồng là fMP4 và thư viện này không bao giờ được đụng tới. TV chậm mạng là CẢ hai
+           nhánh cùng chết.
+         · Nạp lúc LOAD (bản 23/09) ⇒ nhánh MPEG-TS phụ thuộc CDN đúng khoảnh khắc người dùng cast.
+         · `defer` ⇒ tải song song từ lúc receiver khởi động, xong từ lâu trước khi LOAD tới (LOAD
+           chỉ đến sau khi phiên Cast lập xong), mà không chắn khung hình đầu của fMP4.
+      -->
+      <script
+         id="mpegtsLib"
+         defer
+         src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"
+      ></script>
+      <style>
+         html,
+         body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+         }
+         #bgImage,
+         #tvPlayer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+         }
+         #bgImage {
+            object-fit: cover;
+            z-index: 1;
+            transition: opacity 0.3s ease;
+         }
+         #bgImage.hidden {
+            opacity: 0;
+            pointer-events: none;
+         }
+         /* object-fit do TỪNG NHÁNH đặt trong JS, không để CSS quyết định hộ. */
+         #tvPlayer {
+            z-index: 2;
+            background: transparent;
+         }
+         /* Thông báo lỗi cuối cùng — KHÔNG phụ thuộc cờ overlay. Không có nó thì mọi hỏng hóc
+            của receiver đều hiện ra y hệt nhau: một màn hình đen câm. */
+         #fatal {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 12%;
+            z-index: 100000;
+            color: #fff;
+            font-family: sans-serif;
+            font-size: 26px;
+            text-align: center;
+            text-shadow: 0 2px 6px #000;
+            padding: 0 6vw;
+         }
+         #stats {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            color: #0f0;
+            font-size: 15px;
+            line-height: 1.35;
+            z-index: 99999;
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.82);
+            padding: 8px 10px;
+            white-space: pre;
+            border-left: 3px solid #0f0;
+            max-width: 46vw;
+         }
+         #debug {
+            position: absolute;
+            bottom: 8px;
+            left: 8px;
+            right: 8px;
+            color: #9f9;
+            font-size: 14px;
+            line-height: 1.3;
+            z-index: 99999;
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.82);
+            padding: 8px 10px;
+            white-space: pre-wrap;
+            max-height: 34vh;
+            overflow: hidden;
+            border-left: 3px solid #ff0;
+         }
+         .hideDebug {
+            display: none !important;
+         }
+      </style>
+   </head>
+   <body>
+      <img
          id="bgImage"
+         fetchpriority="low"
+         decoding="async"
          src="https://firebasestorage.googleapis.com/v0/b/screen-mirroring-49598.firebasestorage.app/o/chrome_success%2FCongratulation.webp?alt=media&token=a5d7ce4c-1915-4528-af5e-99e319a792ba"
          alt="EcoMirror Background"
       />
-   <video id="tvPlayer" playsinline></video>
-   <script>
-(function () {
-   "use strict";
+      <video id="tvPlayer" playsinline></video>
+      <div id="fatal" class="hideDebug"></div>
+      <div id="stats"></div>
+      <div id="debug"></div>
 
-   var video = document.getElementById("tvPlayer");
-   var background = document.getElementById("bgImage");
-   var currentPlayer = null;
-   var liveEdgeOffset = 0.3;
+      <script>
+         (function () {
+            "use strict";
 
-   if (!window.cast || !cast.framework) return;
-   if (window.mpegts && mpegts.LoggingControl) {
-      mpegts.LoggingControl.enableAll = false;
-   }
+            /* ═══════════════════════════════════════════════════════════════════════════════
+             * CastDuo receiver — HAI nhánh phát ĐỘC LẬP trên cùng endpoint `/stream.ts`:
+             *
+             *   · MPEG-TS (video/MP2T) → mpegts.js.  NHÁNH A, nguyên văn bản đã chạy ổn định.
+             *   · fMP4    (video/mp4)  → MSE native. NHÁNH B, chỉ chạy khi app bật cờ
+             *                            `MpegTsDirectMirroringEco.USE_FMP4_FOR_CHROMECAST`.
+             *
+             * 🔴 LUẬT CỦA FILE NÀY — đọc trước khi sửa bất cứ dòng nào:
+             *
+             *    Hai nhánh KHÔNG dùng chung một biến điều khiển nào. Mọi hằng số, mọi
+             *    `setInterval`, mọi hàm dọn đều nằm trong nhánh của nó. Thứ duy nhất dùng chung là
+             *    thẻ `<video>`, ảnh nền, và `activeBranch` (cho biết nhánh nào đang chạy).
+             *
+             *    Luật này sinh ra từ một ca thật: bản 23/09/2026 gộp hai nhánh vào chung một bộ
+             *    điều khiển phát, với ngưỡng đuổi live đặt theo fragment fMP4 ~66ms. MPEG-TS có
+             *    đơn vị nhỏ nhất ra dây là GOP **1000ms** — lớn hơn MỌI ngưỡng — nên vòng 500ms
+             *    gán `currentTime` liên tục và luồng TS chết hẳn. Một dòng viết cho nhánh này
+             *    KHÔNG được phép với tới nhánh kia.
+             *
+             * Định dạng nhận ra từ `request.media.contentType` của lệnh LOAD — app khai đúng thứ
+             * nó sắp bắn (xem `CastWebService.playMedia`). KHÔNG thăm dò bằng HTTP: mỗi request
+             * vào `TsHttpServer` đều `buffer.clear()`, nên một kết nối thừa là một lần xoá buffer
+             * thừa và hai client chia byte của nhau.
+             * ═══════════════════════════════════════════════════════════════════════════════ */
 
-   var context = cast.framework.CastReceiverContext.getInstance();
-   var manager = context.getPlayerManager();
+            var RECEIVER_VERSION = "2026-09-24";
+            // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
+            // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
+            var T_BOOT = Date.now();
 
-   function stopPlayer() {
-      var previous = currentPlayer;
-      currentPlayer = null;
-      if (previous) {
-         try { previous.destroy(); }
-         catch (error) {
-            // Vẫn giải phóng video nếu thư viện không huỷ được phiên cũ.
-            video.pause();
-            video.removeAttribute("src");
-            video.load();
-         }
-      }
-      video.playbackRate = 1;
-      background.classList.remove("hidden");
-   }
+            /* ══════════════════════ Dùng chung — TỐI THIỂU ══════════════════════ */
 
-   function stopIfCurrent(player) {
-      if (currentPlayer === player) stopPlayer();
-   }
+            var CONFIG_DIAG = {
+               // Overlay chẩn đoán (số liệu + log). TẮT ở bản phát hành; bật lại khi cần truy lỗi
+               // trên TV — khi không có adb thì nó là thứ duy nhất nhìn được vào receiver.
+               DEBUG_OVERLAY: false,
+            };
 
-   video.addEventListener("error", function () {
-      if (currentPlayer) stopPlayer();
-   });
-   window.addEventListener("beforeunload", stopPlayer);
+            var video = document.getElementById("tvPlayer");
+            var background = document.getElementById("bgImage");
+            var fatalEl = document.getElementById("fatal");
+            var statsEl = document.getElementById("stats");
+            var debugEl = document.getElementById("debug");
 
-   manager.setMessageInterceptor(cast.framework.messages.MessageType.STOP, function (request) {
-      stopPlayer();
-      return request;
-   });
+            if (typeof cast === "undefined" || !cast.framework) return;
 
-   manager.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, function (request) {
-      stopPlayer();
-      if (!request || !request.media) return request;
-      var url = request.media.contentId || "";
-      // Chỉ nhận luồng mirror; media thông thường tiếp tục qua CAF.
-      if (!/\/stream\.ts(?:[?#]|$)/i.test(url)) return request;
-      if (!window.mpegts || !mpegts.getFeatureList().mseLivePlayback) return request;
+            var context = cast.framework.CastReceiverContext.getInstance();
+            var manager = context.getPlayerManager();
 
-      var player;
-      try {
-         player = mpegts.createPlayer({
-            type: "mse",
-            isLive: true,
-            url: url
-         }, {
-            enableStashBuffer: true,
-            stashInitialSize: 16384,
-            lazyLoad: false,
-            deferLoadAfterSourceOpen: false,
-            autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 5,
-            autoCleanupMinBackwardDuration: 2,
-            fixAudioTimestampGap: true,
-            // Chỉ dùng tăng tốc phát để đuổi live, tránh hai cơ chế tranh nhau seek.
-            liveBufferLatencyChasing: false,
-            liveSync: true,
-            liveSyncMaxLatency: 1.2,
-            liveSyncTargetLatency: liveEdgeOffset,
-            liveSyncPlaybackRate: 1.05
-         });
-         currentPlayer = player;
-         player.on(mpegts.Events.ERROR, function () { stopIfCurrent(player); });
-         player.attachMediaElement(video);
-         player.load();
-      } catch (error) {
-         stopIfCurrent(player);
-         return null;
-      }
-      // load() có thể phát lỗi đồng bộ qua event.
-      if (currentPlayer !== player) return null;
+            /** "ts" | "fmp4" | null — biến DUY NHẤT mà cả hai nhánh cùng đụng tới. */
+            var activeBranch = null;
 
-      // Gọi play ngay sau load; trình duyệt phát khi khung đầu giải mã được.
-      // mpegts.js StartupStallJumper tự xử lý timestamp bắt đầu khác 0.
-      // Không seek tới live edge trước khung đầu và không đợi đủ 0.4s buffer.
-      video.muted = false;
-      video.volume = 1;
-      try {
-         Promise.resolve(video.play()).then(function () {
-            if (currentPlayer === player) background.classList.add("hidden");
-         }, function () {
-            stopIfCurrent(player);
-         });
-      } catch (error) {
-         stopIfCurrent(player);
-      }
-      return null;
-   });
+            /** Vé của lượt LOAD. `activeBranch` một mình không đủ: hai lệnh LOAD **cùng là TS**
+             *  nối nhau trong lúc mpegts.js còn đang tải sẽ cùng thấy `activeBranch === "ts"`, và
+             *  lượt chờ của lệnh cũ dựng player cho URL đã bị thay. Vé thì không nhầm được. */
+            var loadSeq = 0;
 
-   context.start({ disableIdleTimeout: true });
-})();
-   </script>
-</body>
+            /** Gương chẩn đoán MỘT CHIỀU: nhánh ghi vào, chỉ overlay đọc. Không dòng điều khiển
+             *  nào được phép đọc `diag` — nếu cần đọc thì nó là trạng thái, phải nằm trong nhánh. */
+            var diag = { mode: "—", fmp4: null };
+
+            var logLines = [];
+            var MAX_LOG_LINES = 14;
+            var statsErrShown = false;
+            var lagHist = [];
+
+            if (!CONFIG_DIAG.DEBUG_OVERLAY) {
+               statsEl.className = "hideDebug";
+               debugEl.className = "hideDebug";
+            }
+
+            function ts2() {
+               var d = new Date();
+               return (
+                  ("0" + d.getMinutes()).slice(-2) + ":" +
+                  ("0" + d.getSeconds()).slice(-2) + "." +
+                  ("00" + d.getMilliseconds()).slice(-3)
+               );
+            }
+
+            function log(msg) {
+               try {
+                  logLines.push(ts2() + "  " + msg);
+                  if (logLines.length > MAX_LOG_LINES) logLines.shift();
+                  if (CONFIG_DIAG.DEBUG_OVERLAY) debugEl.textContent = logLines.join("\n");
+                  console.log("[CastDuo] " + msg);
+               } catch (e) {}
+            }
+
+            function showFatal(msg) {
+               log("🔴 " + msg);
+               try {
+                  fatalEl.textContent = msg;
+                  fatalEl.className = "";
+                  background.classList.remove("hidden");
+               } catch (e) {}
+            }
+
+            function clearFatal() {
+               try {
+                  fatalEl.textContent = "";
+                  fatalEl.className = "hideDebug";
+               } catch (e) {}
+            }
+
+            /** Dọn đúng nhánh đang chạy rồi trả màn hình về trạng thái chờ. */
+            function stopAll() {
+               var branch = activeBranch;
+               activeBranch = null;
+               if (branch === "ts") stopTs();
+               else if (branch === "fmp4") stopFmp4();
+               diag.mode = "—";
+               try { video.playbackRate = 1; } catch (e) {}
+               background.classList.remove("hidden");
+            }
+
+            // Lỗi của thẻ <video> thuộc về nhánh đang giữ nó. Sau `stopAll()` thì `activeBranch`
+            // rỗng nên lần bắn lại (do `video.load()` trong lúc dọn) là no-op — đúng như bản ổn định.
+            video.addEventListener("error", function () {
+               if (!activeBranch) return;
+               var err = video.error;
+               log("VIDEO ERROR code=" + (err ? err.code : "?") +
+                   " msg=" + (err && err.message ? err.message : ""));
+               stopAll();
+               showFatal("Không phát được luồng từ điện thoại");
+            });
+            window.addEventListener("beforeunload", stopAll);
+
+            /* ═════════════ NHÁNH A — MPEG-TS (nguyên văn bản đã chạy ổn định) ═════════════
+             *
+             * Nhánh này KHÔNG có watcher, KHÔNG seek, KHÔNG thăm dò. Việc đuổi live giao trọn cho
+             * `liveSync*` của mpegts.js — một cơ chế, không phải hai. Mọi tham số dưới đây là
+             * nguyên văn bản ổn định; đổi một giá trị là rời khỏi thứ đã được kiểm chứng trên TV
+             * thật, nên đừng đổi mà không đo lại.
+             */
+
+            var tsPlayer = null;
+            var tsLiveEdgeOffset = 0.3;
+            var mpegtsState = null; // "ready" | "failed" | null (đang tải)
+            var mpegtsWaiters = [];
+            var MPEGTS_WAIT_MS = 3000;
+
+            (function watchMpegtsScript() {
+               if (typeof mpegts !== "undefined") { mpegtsState = "ready"; return; }
+               var el = document.getElementById("mpegtsLib");
+               if (!el) { mpegtsState = "failed"; return; }
+               el.addEventListener("load", function () { settleMpegts("ready"); });
+               el.addEventListener("error", function () { settleMpegts("failed"); });
+            })();
+
+            function settleMpegts(state) {
+               if (mpegtsState) return;
+               mpegtsState = state;
+               log("mpegts.js " + state + " (+" + (Date.now() - T_BOOT) + "ms)");
+               var waiters = mpegtsWaiters;
+               mpegtsWaiters = [];
+               for (var i = 0; i < waiters.length; i++) waiters[i](state === "ready");
+            }
+
+            /**
+             * Hàng rào quanh thẻ `<script defer>`: thư viện gần như luôn sẵn sàng trước khi LOAD
+             * tới, nên đây chỉ là lưới an toàn. Mã tạo player bên dưới KHÔNG đổi một tham số nào.
+             */
+            function whenMpegtsReady(onDone) {
+               if (mpegtsState) { onDone(mpegtsState === "ready"); return; }
+               mpegtsWaiters.push(onDone);
+               setTimeout(function () { settleMpegts("failed"); }, MPEGTS_WAIT_MS);
+            }
+
+            function stopTs() {
+               var previous = tsPlayer;
+               tsPlayer = null;
+               if (previous) {
+                  try {
+                     previous.destroy();
+                  } catch (error) {
+                     // Vẫn giải phóng video nếu thư viện không huỷ được phiên cũ.
+                     video.pause();
+                     video.removeAttribute("src");
+                     video.load();
+                  }
+               }
+            }
+
+            function stopTsIfCurrent(player, message) {
+               // LOAD mới đã gọi `stopAll()` nên `tsPlayer` khác `player`; so sánh này giữ cho
+               // một player cũ chết muộn không giết được phiên đang chạy.
+               if (tsPlayer !== player) return;
+               stopAll();
+               if (message) showFatal(message);
+            }
+
+            function startMpegTs(url, request, ticket) {
+               return new Promise(function (resolve) {
+                  whenMpegtsReady(function (ready) {
+                     // đã bị STOP, hoặc một lệnh LOAD sau đã chiếm chỗ
+                     if (activeBranch !== "ts" || ticket !== loadSeq) { resolve(null); return; }
+                     if (!ready || typeof mpegts === "undefined" ||
+                         !mpegts.getFeatureList().mseLivePlayback) {
+                        activeBranch = null;
+                        showFatal("TV chưa tải được thư viện giải mã — kiểm tra mạng của TV");
+                        resolve(request); // nhường CAF, đúng như bản ổn định
+                        return;
+                     }
+                     startMpegTsNow(url);
+                     resolve(null);
+                  });
+               });
+            }
+
+            function startMpegTsNow(url) {
+               if (mpegts.LoggingControl) mpegts.LoggingControl.enableAll = false;
+               video.style.objectFit = "contain";
+               diag.mode = "MPEG-TS/mpegts.js";
+
+               var player;
+               try {
+                  player = mpegts.createPlayer(
+                     {
+                        type: "mse",
+                        isLive: true,
+                        url: url,
+                     },
+                     {
+                        enableStashBuffer: true,
+                        stashInitialSize: 16384,
+                        lazyLoad: false,
+                        deferLoadAfterSourceOpen: false,
+                        autoCleanupSourceBuffer: true,
+                        autoCleanupMaxBackwardDuration: 5,
+                        autoCleanupMinBackwardDuration: 2,
+                        fixAudioTimestampGap: true,
+                        // Chỉ dùng tăng tốc phát để đuổi live, tránh hai cơ chế tranh nhau seek.
+                        liveBufferLatencyChasing: false,
+                        liveSync: true,
+                        liveSyncMaxLatency: 1.2,
+                        liveSyncTargetLatency: tsLiveEdgeOffset,
+                        liveSyncPlaybackRate: 1.05,
+                     },
+                  );
+                  tsPlayer = player;
+                  player.on(mpegts.Events.ERROR, function (type, detail) {
+                     log("mpegts ERROR: " + type + " / " + detail);
+                     stopTsIfCurrent(player, "Mất luồng từ điện thoại — thử cast lại");
+                  });
+                  player.attachMediaElement(video);
+                  player.load();
+                  log("mpegts.js load()  (+" + (Date.now() - T_BOOT) + "ms)");
+               } catch (error) {
+                  stopTsIfCurrent(player);
+                  return;
+               }
+               // load() có thể phát lỗi đồng bộ qua event.
+               if (tsPlayer !== player) return;
+
+               // Gọi play ngay sau load; trình duyệt phát khi khung đầu giải mã được.
+               // mpegts.js StartupStallJumper tự xử lý timestamp bắt đầu khác 0.
+               // Không seek tới live edge trước khung đầu và không đợi đủ 0.4s buffer.
+               video.muted = false;
+               video.volume = 1;
+               try {
+                  Promise.resolve(video.play()).then(
+                     function () {
+                        if (tsPlayer === player) background.classList.add("hidden");
+                     },
+                     function () {
+                        stopTsIfCurrent(player);
+                     },
+                  );
+               } catch (error) {
+                  stopTsIfCurrent(player);
+               }
+            }
+
+            /* ══════════════════ NHÁNH B — fMP4 (MSE native) ══════════════════
+             *
+             * Toàn bộ hằng số, watcher và trạng thái của nhánh này nằm gọn trong khối dưới đây.
+             * Không một dòng nào ở đây được nhánh MPEG-TS gọi tới, và ngược lại.
+             */
+
+            var FMP4_CONFIG = {
+               // 🔴 `chaseLag` QUYẾT ĐỊNH độ trễ ở trạng thái ổn định, không phải `liveEdgeOffset`.
+               // Vòng đuổi chỉ can thiệp khi lag vượt ngưỡng này, nên lag thực tế luôn trôi lên và
+               // **đứng quanh đúng `chaseLag`**.
+               //
+               // Sàn an toàn gắn với độ dài fragment: fMP4 hiện ~66ms (`-frag_duration 60000`), cần
+               // 2–3 fragment trong buffer để không underrun ⇒ ~0,2s. Đổi `frag_duration` phía app
+               // thì phải chỉnh lại các ngưỡng này theo. Những con số này CHỈ đúng cho fMP4 —
+               // đây chính là chỗ bản 23/09 đem áp nhầm cho MPEG-TS và làm chết luồng TS.
+               startBufferSec: 0.15, // ≈2 fragment
+               liveEdgeOffset: 0.15, // khoảng cách tới live edge khi seek
+               chaseLag: 0.35,       // lag > ngưỡng này ⇒ tăng tốc đuổi
+               chaseRate: 1.15,      // 1.08 kéo 1,0s về 0,35s mất ~8 giây — quá chậm
+               hardSeekLag: 0.9,     // lag > ngưỡng này ⇒ nhảy thẳng. Mirror chịu được một cú giật
+                                     // hơn là chịu 1 giây trễ kéo dài
+               maxBackBufferSec: 3,  // giữ tối đa bao nhiêu giây phía sau currentTime
+            };
+
+            var fmp4 = null;
+            var fmp4ReadyTimer = null;
+            var fmp4ChaseTimer = null;
+
+            function reportDeviceCapability() {
+               try {
+                  var m = (navigator.userAgent || "").match(/Chrome\/([\d.]+)/);
+                  log("Chromium=" + (m ? m[1] : "?") +
+                      " | fetch=" + !!window.fetch +
+                      " ReadableStream=" + !!window.ReadableStream +
+                      " MSE=" + !!window.MediaSource);
+               } catch (e) {}
+               try {
+                  var c = [
+                     'video/mp4; codecs="avc1.42E01E"',
+                     'video/mp4; codecs="avc1.4D4028"',
+                     'video/mp4; codecs="avc1.640028"',
+                     'video/mp4; codecs="avc1.640028,mp4a.40.2"',
+                  ];
+                  var out = [];
+                  for (var i = 0; i < c.length; i++) {
+                     var ok = false;
+                     try { ok = MediaSource.isTypeSupported(c[i]); } catch (e) {}
+                     out.push((ok ? "✅" : "❌") + c[i].replace('video/mp4; codecs="', "").replace('"', ""));
+                  }
+                  log("codec: " + out.join("  "));
+               } catch (e) {}
+            }
+
+            /* -------------------- MP4 box parser (tối thiểu) -------------------- */
+
+            /** Đọc size+type của box tại `off`. Trả null khi chưa đủ byte. */
+            function readBoxHeader(buf, off) {
+               if (off + 8 > buf.length) return null;
+               var dv = new DataView(buf.buffer, buf.byteOffset + off, 8);
+               var size = dv.getUint32(0);
+               var type = String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
+               var headerSize = 8;
+               if (size === 1) {
+                  // largesize 64-bit — fMP4 hiếm khi dùng, nhưng không xử lý là parse lệch vĩnh viễn
+                  if (off + 16 > buf.length) return null;
+                  var dv2 = new DataView(buf.buffer, buf.byteOffset + off + 8, 8);
+                  var hi = dv2.getUint32(0), lo = dv2.getUint32(4);
+                  size = hi * 4294967296 + lo;
+                  headerSize = 16;
+               } else if (size === 0) {
+                  size = buf.length - off; // "tới hết file"
+               }
+               return { size: size, type: type, headerSize: headerSize };
+            }
+
+            /**
+             * Dựng codec string từ init segment.
+             *
+             * 🔴 Vì sao phải parse thay vì hardcode: `EcoVideoEncoder` KHÔNG đặt `KEY_PROFILE`
+             * (xem direct_v3/AGENT.MD) nên profile do encoder của **từng máy Android** tự chọn —
+             * Baseline trên máy này, High trên máy khác. Khai sai profile với MSE là
+             * `addSourceBuffer` ném NotSupportedError và màn hình đen không lý do.
+             */
+            function codecStringFromInit(buf) {
+               var codecs = [];
+               try {
+                  // avcC nằm sâu trong moov > trak > mdia > minf > stbl > stsd > avc1 > avcC.
+                  // Quét phẳng cả buffer cho gọn — init segment chỉ vài trăm byte.
+                  var i = 0;
+                  var avcCOff = -1;
+                  for (i = 0; i + 4 < buf.length; i++) {
+                     if (buf[i] === 0x61 && buf[i + 1] === 0x76 && buf[i + 2] === 0x63 && buf[i + 3] === 0x43) {
+                        avcCOff = i + 4; // ngay sau fourcc "avcC"
+                        break;
+                     }
+                  }
+                  if (avcCOff > 0 && avcCOff + 4 <= buf.length) {
+                     var profile = buf[avcCOff + 1];
+                     var compat = buf[avcCOff + 2];
+                     var level = buf[avcCOff + 3];
+                     var hex = function (n) { return ("0" + n.toString(16)).slice(-2); };
+                     codecs.push("avc1." + hex(profile) + hex(compat) + hex(level));
+                     log("avcC: profile=" + profile + " compat=" + compat + " level=" + level);
+                  } else {
+                     log("⚠️ không tìm thấy avcC — dùng codec string dự phòng");
+                     codecs.push("avc1.42E01E");
+                  }
+
+                  // Có track audio không: tìm fourcc "mp4a"
+                  for (i = 0; i + 4 < buf.length; i++) {
+                     if (buf[i] === 0x6d && buf[i + 1] === 0x70 && buf[i + 2] === 0x34 && buf[i + 3] === 0x61) {
+                        codecs.push("mp4a.40.2");
+                        break;
+                     }
+                  }
+               } catch (e) {
+                  log("🔴 parse init lỗi: " + e);
+                  return 'video/mp4; codecs="avc1.42E01E"';
+               }
+               return 'video/mp4; codecs="' + codecs.join(",") + '"';
+            }
+
+            /* ----------------------------- Fmp4Player ----------------------------- */
+
+            function Fmp4Player(videoEl) {
+               this.video = videoEl;
+               this.ms = null;
+               this.sb = null;
+               this.objUrl = null;
+               this.queue = [];
+               this.pending = new Uint8Array(0); // byte chưa đủ để tạo init segment
+               this.initDone = false;
+               this.aborted = false;
+               this.reader = null;
+               this.bytesIn = 0;
+               this.appends = 0;
+               this.warnedEmpty = false;
+            }
+
+            Fmp4Player.prototype.concat = function (a, b) {
+               var out = new Uint8Array(a.length + b.length);
+               out.set(a, 0);
+               out.set(b, a.length);
+               return out;
+            };
+
+            /**
+             * Init segment = mọi box TRƯỚC `moof` đầu tiên (ftyp + moov).
+             * Trả -1 khi chưa nhận đủ.
+             */
+            Fmp4Player.prototype.findInitEnd = function (buf) {
+               var off = 0;
+               while (off < buf.length) {
+                  var h = readBoxHeader(buf, off);
+                  if (!h || h.size <= 0) return -1;
+                  if (h.type === "moof") return off; // init kết thúc ngay trước moof
+                  if (off + h.size > buf.length) return -1; // box chưa về đủ
+                  off += h.size;
+               }
+               return -1;
+            };
+
+            Fmp4Player.prototype.appendNext = function () {
+               if (this.aborted || !this.sb || this.sb.updating || this.queue.length === 0) return;
+               var chunk = this.queue.shift();
+               try {
+                  this.sb.appendBuffer(chunk);
+               } catch (e) {
+                  if (e && e.name === "QuotaExceededError") {
+                     // SourceBuffer đầy — dọn phần đã phát rồi thử lại chính chunk này
+                     log("⚠️ QuotaExceeded — dọn back buffer");
+                     this.queue.unshift(chunk);
+                     this.trimBackBuffer(true);
+                  } else {
+                     log("🔴 appendBuffer: " + e);
+                  }
+               }
+            };
+
+            Fmp4Player.prototype.trimBackBuffer = function (aggressive) {
+               try {
+                  if (!this.sb || this.sb.updating) return;
+                  var buffered = this.sb.buffered;
+                  if (buffered.length === 0) return;
+                  var start = buffered.start(0);
+                  var keepFrom = this.video.currentTime - (aggressive ? 1 : FMP4_CONFIG.maxBackBufferSec);
+                  if (keepFrom > start + 0.5) this.sb.remove(start, keepFrom);
+               } catch (e) {}
+            };
+
+            Fmp4Player.prototype.start = function (firstChunk, reader) {
+               var self = this;
+               this.reader = reader;
+
+               this.ms = new MediaSource();
+               this.objUrl = URL.createObjectURL(this.ms);
+               this.video.src = this.objUrl;
+
+               this.ms.addEventListener("sourceopen", function () {
+                  log("MediaSource sourceopen");
+                  self.pending = firstChunk;
+                  self.trySetupSourceBuffer();
+                  self.pump();
+               });
+               this.ms.addEventListener("sourceended", function () { log("⚠️ sourceended"); });
+               this.ms.addEventListener("error", function () {
+                  log("🔴 MediaSource error");
+                  stopFmp4IfCurrent(self, "TV không dựng được bộ giải mã cho luồng này");
+               });
+            };
+
+            Fmp4Player.prototype.trySetupSourceBuffer = function () {
+               if (this.initDone || this.aborted) return;
+               var initEnd = this.findInitEnd(this.pending);
+               if (initEnd <= 0) return; // chưa đủ byte, đợi chunk sau
+
+               var initSeg = this.pending.subarray(0, initEnd);
+               var mime = codecStringFromInit(initSeg);
+               log("init segment " + initEnd + "B ⇒ " + mime);
+
+               var supported = false;
+               try { supported = MediaSource.isTypeSupported(mime); } catch (e) {}
+               if (!supported) {
+                  log("🔴 THIẾT BỊ KHÔNG HỖ TRỢ " + mime);
+                  // Hạ xuống chỉ video — nhiều decoder từ chối vì phần audio chứ không phải video
+                  var videoOnly = mime.split(",")[0] + '"';
+                  try { supported = MediaSource.isTypeSupported(videoOnly); } catch (e) {}
+                  if (supported) {
+                     log("⚠️ lùi về " + videoOnly + " (mất tiếng)");
+                     mime = videoOnly;
+                  } else {
+                     stopFmp4IfCurrent(this, "TV không hỗ trợ định dạng video này");
+                     return;
+                  }
+               }
+
+               var self = this;
+               try {
+                  this.sb = this.ms.addSourceBuffer(mime);
+               } catch (e) {
+                  log("🔴 addSourceBuffer NÉM: " + e);
+                  stopFmp4IfCurrent(this, "TV không hỗ trợ định dạng video này");
+                  return;
+               }
+
+               // 'sequence': xếp fragment liên tiếp, bỏ qua baseMediaDecodeTime gốc.
+               // Live stream không có mốc thời gian tuyệt đối nào đáng tin để tôn trọng.
+               try { this.sb.mode = "sequence"; } catch (e) {}
+
+               this.sb.addEventListener("updateend", function () {
+                  self.appends++;
+                  // 🔴 Ca đã cắn một lần (22/09/2026): byte về đều, appendBuffer KHÔNG ném lỗi nào,
+                  // nhưng `buffered` rỗng vĩnh viễn và readyState kẹt 0 — màn hình đen không dấu vết.
+                  // Nguyên nhân hôm đó: `+frag_every_frame` sinh moof ĐƠN-TRACK xen kẽ (video/tiếng)
+                  // nên Chrome MSE không dựng nổi timeline. Không tầng nào báo lỗi ⇒ phải tự hỏi.
+                  try {
+                     var nb = self.sb.buffered.length;
+                     if (self.appends <= 3 || self.appends === 10) {
+                        log("append #" + self.appends + " (" + (self.bytesIn / 1024).toFixed(0) +
+                           "KB) ⇒ buffered=" +
+                           (nb ? self.sb.buffered.end(nb - 1).toFixed(2) + "s" : "RỖNG"));
+                     }
+                     if (!self.warnedEmpty && self.appends >= 12 && nb === 0) {
+                        self.warnedEmpty = true;
+                        log("🔴 ĐÃ APPEND " + self.appends + " lần / " +
+                           (self.bytesIn / 1024).toFixed(0) + "KB mà buffered VẪN RỖNG");
+                        log("🔴 MSE không parse được media segment. Nghi: moof đơn-track xen kẽ " +
+                           "(-movflags phía app), hoặc codec string lệch bitstream thật.");
+                        showFatal("TV không giải mã được luồng fMP4");
+                     }
+                  } catch (e) {}
+                  self.appendNext();
+                  self.trimBackBuffer(false);
+               });
+               this.sb.addEventListener("error", function () { log("🔴 SourceBuffer error"); });
+
+               this.initDone = true;
+               this.queue.push(this.pending); // init + phần dư đi cùng một lần append
+               this.pending = new Uint8Array(0);
+               this.appendNext();
+            };
+
+            Fmp4Player.prototype.pump = function () {
+               var self = this;
+               if (this.aborted) return;
+               this.reader.read().then(
+                  function (res) {
+                     if (self.aborted) return;
+                     if (res.done) {
+                        log("⚠️ nguồn đóng (reader done)");
+                        return;
+                     }
+                     var chunk = new Uint8Array(res.value);
+                     self.bytesIn += chunk.length;
+
+                     if (!self.initDone) {
+                        self.pending = self.concat(self.pending, chunk);
+                        self.trySetupSourceBuffer();
+                     } else {
+                        self.queue.push(chunk);
+                        self.appendNext();
+                     }
+                     self.pump();
+                  },
+                  function (err) {
+                     if (!self.aborted) log("🔴 reader lỗi: " + err);
+                  },
+               );
+            };
+
+            Fmp4Player.prototype.destroy = function () {
+               this.aborted = true;
+               try { this.reader && this.reader.cancel(); } catch (e) {}
+               try {
+                  if (this.sb && this.ms && this.ms.readyState === "open") this.ms.endOfStream();
+               } catch (e) {}
+               this.queue = [];
+               this.pending = new Uint8Array(0);
+               // 🔴 Không trả thẻ <video> về trạng thái sạch thì nhánh MPEG-TS lần sau gắn vào một
+               // MediaSource đã chết — đúng ca "đổi cờ rồi cast lại là đen màn".
+               try { this.video.pause(); } catch (e) {}
+               if (this.objUrl) {
+                  try { URL.revokeObjectURL(this.objUrl); } catch (e) {}
+                  this.objUrl = null;
+               }
+               try {
+                  this.video.removeAttribute("src");
+                  this.video.load();
+               } catch (e) {}
+               this.ms = null;
+               this.sb = null;
+            };
+
+            /* --------------------- Điều khiển phát của nhánh fMP4 --------------------- */
+
+            function clearFmp4Watchers() {
+               // 🔴 Bản 23/09 không giữ handle của vòng 500ms nên không bao giờ dừng được nó:
+               // cast lần thứ N là N vòng cùng ghi `currentTime`.
+               if (fmp4ReadyTimer) { clearInterval(fmp4ReadyTimer); fmp4ReadyTimer = null; }
+               if (fmp4ChaseTimer) { clearInterval(fmp4ChaseTimer); fmp4ChaseTimer = null; }
+            }
+
+            function startFmp4Watchers() {
+               clearFmp4Watchers();
+               var playStarted = false;
+
+               fmp4ReadyTimer = setInterval(function () {
+                  if (activeBranch !== "fmp4") { clearFmp4Watchers(); return; }
+                  try {
+                     var buf = video.buffered;
+                     if (buf.length === 0) return;
+                     var end = buf.end(buf.length - 1);
+                     var start = buf.start(0);
+                     if (end - start < FMP4_CONFIG.startBufferSec) return;
+
+                     clearInterval(fmp4ReadyTimer);
+                     fmp4ReadyTimer = null;
+
+                     var target = Math.max(end - FMP4_CONFIG.liveEdgeOffset, start);
+                     try { video.currentTime = target; } catch (e) {}
+                     video.muted = false;
+                     video.volume = 1.0;
+                     video.play().then(
+                        function () {
+                           log("▶️ PLAY [" + diag.mode + "] buffer=" + (end - start).toFixed(2) +
+                               "s seek→" + target.toFixed(2) +
+                               "  | tới khung đầu: " + (Date.now() - T_BOOT) + "ms");
+                        },
+                        function (e) { log("🔴 play() từ chối: " + e); },
+                     );
+                     playStarted = true;
+                     background.classList.add("hidden");
+                  } catch (e) {
+                     log("🔴 checkReady: " + e);
+                  }
+               }, 100);
+
+               fmp4ChaseTimer = setInterval(function () {
+                  if (activeBranch !== "fmp4") { clearFmp4Watchers(); return; }
+                  if (!playStarted) return;
+                  try {
+                     var buf = video.buffered;
+                     if (buf.length === 0) return;
+                     var end = buf.end(buf.length - 1);
+                     var lag = end - video.currentTime;
+                     if (lag > FMP4_CONFIG.hardSeekLag) {
+                        video.currentTime = end - FMP4_CONFIG.liveEdgeOffset;
+                        video.playbackRate = 1.0;
+                        log("⏩ lag " + lag.toFixed(2) + "s ⇒ nhảy live edge");
+                     } else if (lag > FMP4_CONFIG.chaseLag) {
+                        if (video.playbackRate !== FMP4_CONFIG.chaseRate) {
+                           video.playbackRate = FMP4_CONFIG.chaseRate;
+                        }
+                     } else if (video.playbackRate !== 1.0) {
+                        video.playbackRate = 1.0;
+                     }
+                  } catch (e) {}
+               }, 500);
+            }
+
+            function stopFmp4() {
+               clearFmp4Watchers();
+               var previous = fmp4;
+               fmp4 = null;
+               diag.fmp4 = null;
+               if (previous) {
+                  try { previous.destroy(); } catch (e) {}
+               }
+            }
+
+            function stopFmp4IfCurrent(player, message) {
+               if (fmp4 !== player) return;
+               stopAll();
+               if (message) showFatal(message);
+            }
+
+            function startFmp4(url) {
+               video.style.objectFit = "cover";
+               diag.mode = "fMP4/MSE";
+               reportDeviceCapability();
+
+               if (!window.fetch || !window.ReadableStream || !window.MediaSource) {
+                  activeBranch = null;
+                  showFatal("TV không hỗ trợ MSE — không phát được luồng này");
+                  return null;
+               }
+
+               // Một kết nối duy nhất, và nó được DÙNG LUÔN để phát — không thăm dò rồi nối lại.
+               fetch(url).then(
+                  function (res) {
+                     if (activeBranch !== "fmp4") { try { res.body.cancel(); } catch (e) {} return; }
+                     log("HTTP " + res.status + " content-type=" +
+                         (res.headers.get("content-type") || "(trống)"));
+                     var reader = res.body.getReader();
+                     reader.read().then(function (r) {
+                        if (activeBranch !== "fmp4") { try { reader.cancel(); } catch (e) {} return; }
+                        if (r.done) {
+                           stopAll();
+                           showFatal("Điện thoại chưa gửi dữ liệu — thử cast lại");
+                           return;
+                        }
+                        var first = new Uint8Array(r.value);
+                        // Kiểm chéo bằng byte: "ftyp" ở offset 4 của fMP4
+                        var isFtyp = first.length > 8 &&
+                           first[4] === 0x66 && first[5] === 0x74 &&
+                           first[6] === 0x79 && first[7] === 0x70;
+                        log("byte đầu: " + (isFtyp ? "ftyp ✅ fMP4"
+                           : "0x" + first[0].toString(16) + " ⚠️ không phải ftyp"));
+                        fmp4 = new Fmp4Player(video);
+                        diag.fmp4 = fmp4;
+                        fmp4.start(first, reader);
+                        startFmp4Watchers();
+                     });
+                  },
+                  function (err) {
+                     // KHÔNG lùi sang mpegts.js ở đây: app đã khai luồng này là fMP4, ép byte fMP4
+                     // vào mpegts.js chỉ đổi một lỗi rõ ràng lấy một lỗi khó đọc.
+                     if (activeBranch !== "fmp4") return;
+                     stopAll();
+                     showFatal("Không kết nối được tới điện thoại");
+                     log("fetch lỗi: " + err);
+                  },
+               );
+               return null;
+            }
+
+            /* ══════════════════════ Điều phối LOAD / STOP ══════════════════════ */
+
+            manager.setMessageInterceptor(
+               cast.framework.messages.MessageType.STOP,
+               function (request) {
+                  stopAll();
+                  clearFatal();
+                  return request;
+               },
+            );
+
+            manager.setMessageInterceptor(
+               cast.framework.messages.MessageType.LOAD,
+               function (request) {
+                  stopAll();
+                  clearFatal();
+                  if (!request || !request.media) return request;
+
+                  var ticket = ++loadSeq;
+                  var url = request.media.contentId || "";
+                  var ct = (request.media.contentType || "").toLowerCase();
+                  log("LOAD ⇒ " + url + "  type=" + ct +
+                      "  (+" + (Date.now() - T_BOOT) + "ms từ lúc receiver chạy)");
+
+                  // Chỉ nhận luồng mirror; media thông thường tiếp tục qua CAF.
+                  if (!/\/stream\.ts(?:[?#]|$)/i.test(url)) return request;
+
+                  // Thiếu/không đọc được contentType ⇒ MPEG-TS. Đó là mặc định của mọi bản app
+                  // đang ở ngoài thị trường, và là nhánh đã chạy ổn định.
+                  if (ct.indexOf("mp4") >= 0 && ct.indexOf("mp2t") < 0) {
+                     activeBranch = "fmp4";
+                     return startFmp4(url);
+                  }
+                  activeBranch = "ts";
+                  return startMpegTs(url, request, ticket);
+               },
+            );
+
+            /* Số liệu cập nhật liên tục — chỉ dựng khi bật overlay, để bản phát hành không giữ
+               một interval chạy mãi chẳng làm gì. Khối này CHỈ ĐỌC, không đụng vào playback. */
+            if (CONFIG_DIAG.DEBUG_OVERLAY) setInterval(function () {
+               try {
+                  var v = video;
+                  var buf = v.buffered;
+                  var bufStr = "—", lagStr = "—";
+                  if (buf.length > 0) {
+                     var end = buf.end(buf.length - 1);
+                     bufStr = (end - buf.start(0)).toFixed(2) + "s";
+                     lagStr = (end - v.currentTime).toFixed(2) + "s";
+                     // gom lag để đọc được xu hướng, không phải một mẫu nhiễu
+                     var lagNow = end - v.currentTime;
+                     if (isFinite(lagNow) && lagNow >= 0 && !v.paused) {
+                        lagHist.push(lagNow);
+                        if (lagHist.length > 40) lagHist.shift(); // ~20s ở nhịp 500ms
+                     }
+                  }
+                  var lagAvg = "—", lagMin = "—", lagMax = "—";
+                  if (lagHist.length > 3) {
+                     var sum = 0, mn = 1e9, mx = -1e9;
+                     for (var i = 0; i < lagHist.length; i++) {
+                        sum += lagHist[i];
+                        if (lagHist[i] < mn) mn = lagHist[i];
+                        if (lagHist[i] > mx) mx = lagHist[i];
+                     }
+                     lagAvg = (sum / lagHist.length).toFixed(2) + "s";
+                     lagMin = mn.toFixed(2); lagMax = mx.toFixed(2);
+                  }
+                  var f = diag.fmp4;
+                  statsEl.textContent =
+                     "mode       " + diag.mode + "\n" +
+                     "branch     " + (activeBranch || "—") + "\n" +
+                     "LAG(live)  " + lagStr + (v.playbackRate !== 1 ? "  ⏩đuổi" : "") + "\n" +
+                     "lag avg    " + lagAvg + "  (" + lagMin + "–" + lagMax + ")\n" +
+                     "buffer     " + bufStr + "\n" +
+                     "curTime    " + v.currentTime.toFixed(2) + "\n" +
+                     "rate       " + v.playbackRate + "\n" +
+                     "readyState " + v.readyState + "\n" +
+                     "paused     " + v.paused + "\n" +
+                     "bytes in   " + (f ? (f.bytesIn / 1024).toFixed(0) + " KB" : "—") + "\n" +
+                     "appends    " + (f ? f.appends : "—") + "\n" +
+                     "queue      " + (f ? f.queue.length : "—");
+               } catch (e) {
+                  // `catch` rỗng ở đây từng giấu một ReferenceError làm CẢ khối số liệu chết im lặng
+                  // (overlay trống mà không ai biết vì sao). Báo đúng một lần là đủ để không lặp lại.
+                  if (!statsErrShown) {
+                     statsErrShown = true;
+                     log("🔴 khối số liệu lỗi: " + e);
+                  }
+               }
+            }, 500);
+
+            window.addEventListener("error", function (e) {
+               log("🔴 JS ERROR: " + (e.message || e) + " @" + (e.lineno || "?"));
+            });
+            window.addEventListener("unhandledrejection", function (e) {
+               log("🔴 PROMISE REJECT: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+            });
+
+            log("receiver khởi động — bản " + RECEIVER_VERSION);
+            context.start({ disableIdleTimeout: true });
+         })();
+      </script>
+   </body>
 </html>
