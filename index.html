@@ -146,7 +146,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-09-24b";
+            var RECEIVER_VERSION = "2026-09-24c";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -201,11 +201,13 @@
                );
             }
 
+            /** Nhật ký chẩn đoán — KHÔNG làm gì ở bản phát hành. Bật `DEBUG_OVERLAY` khi cần truy lỗi. */
             function log(msg) {
+               if (!CONFIG_DIAG.DEBUG_OVERLAY) return;
                try {
                   logLines.push(ts2() + "  " + msg);
                   if (logLines.length > MAX_LOG_LINES) logLines.shift();
-                  if (CONFIG_DIAG.DEBUG_OVERLAY) debugEl.textContent = logLines.join("\n");
+                  debugEl.textContent = logLines.join("\n");
                   console.log("[CastDuo] " + msg);
                } catch (e) {}
             }
@@ -431,36 +433,16 @@
                hardSeekLag: 1.5,      // chỉ khi trễ quá ngần này mới nhảy thẳng — lúc đó đuổi
                                       // bằng tốc độ sẽ mất quá lâu
                maxBackBufferSec: 3,   // giữ tối đa bao nhiêu giây phía sau currentTime
+               trimBatchSec: 2,       // dọn back buffer THEO LÔ ≥2s: mỗi `remove()` chặn lượt append
+                                      // kế tiếp tới khi xong, dọn 0,5s một lần là ~2 lần/giây tắc
+                                      // nhỏ trên TV yếu
+               trimEveryAppends: 10,  // xét dọn mỗi 10 lần append (~1 giây), không phải mỗi lần
+               emptyAppendsFatal: 12, // ~1,2 giây byte về mà không giải mã được gì ⇒ báo lỗi
             };
 
             var fmp4 = null;
             var fmp4ReadyTimer = null;
             var fmp4ChaseTimer = null;
-
-            function reportDeviceCapability() {
-               try {
-                  var m = (navigator.userAgent || "").match(/Chrome\/([\d.]+)/);
-                  log("Chromium=" + (m ? m[1] : "?") +
-                      " | fetch=" + !!window.fetch +
-                      " ReadableStream=" + !!window.ReadableStream +
-                      " MSE=" + !!window.MediaSource);
-               } catch (e) {}
-               try {
-                  var c = [
-                     'video/mp4; codecs="avc1.42E01E"',
-                     'video/mp4; codecs="avc1.4D4028"',
-                     'video/mp4; codecs="avc1.640028"',
-                     'video/mp4; codecs="avc1.640028,mp4a.40.2"',
-                  ];
-                  var out = [];
-                  for (var i = 0; i < c.length; i++) {
-                     var ok = false;
-                     try { ok = MediaSource.isTypeSupported(c[i]); } catch (e) {}
-                     out.push((ok ? "✅" : "❌") + c[i].replace('video/mp4; codecs="', "").replace('"', ""));
-                  }
-                  log("codec: " + out.join("  "));
-               } catch (e) {}
-            }
 
             /* -------------------- MP4 box parser (tối thiểu) -------------------- */
 
@@ -546,6 +528,7 @@
                this.bytesIn = 0;
                this.appends = 0;
                this.warnedEmpty = false;
+               this.sawData = false; // đã từng thấy `buffered` có dữ liệu — thôi canh từ đó
             }
 
             Fmp4Player.prototype.concat = function (a, b) {
@@ -591,11 +574,40 @@
             Fmp4Player.prototype.trimBackBuffer = function (aggressive) {
                try {
                   if (!this.sb || this.sb.updating) return;
+                  // Đường thường chỉ xét mỗi ~1 giây: gọi từ MỌI `updateend` (~10 lần/giây) mà lần nào
+                  // cũng đọc `buffered` là việc thừa. Đường QuotaExceeded thì xét ngay.
+                  if (!aggressive && this.appends % FMP4_CONFIG.trimEveryAppends !== 0) return;
                   var buffered = this.sb.buffered;
                   if (buffered.length === 0) return;
                   var start = buffered.start(0);
                   var keepFrom = this.video.currentTime - (aggressive ? 1 : FMP4_CONFIG.maxBackBufferSec);
-                  if (keepFrom > start + 0.5) this.sb.remove(start, keepFrom);
+                  var minBatch = aggressive ? 0.5 : FMP4_CONFIG.trimBatchSec;
+                  if (keepFrom > start + minBatch) this.sb.remove(start, keepFrom);
+               } catch (e) {}
+            };
+
+            /**
+             * Canh ca "byte về đều mà không giải mã được gì" — CHỈ cho tới khi thấy dữ liệu đầu tiên.
+             *
+             * 🔴 Ca đã cắn hai lần (22/09: moof đơn-track; 24/09: intra refresh làm mất IDR): byte về
+             * đều, `appendBuffer` KHÔNG ném lỗi nào, nhưng `buffered` rỗng vĩnh viễn — màn hình đen
+             * không dấu vết. Không tầng nào báo lỗi ⇒ phải tự hỏi.
+             *
+             * Bản trước hỏi ở MỌI lần append suốt cả phiên. Nay thấy dữ liệu một lần là thôi. Và nếu
+             * đã báo lỗi mà sau đó dữ liệu về (IDR tới muộn), gỡ dòng báo lỗi — trước đây nó dính
+             * trên màn hình cả khi hình đã chạy bình thường.
+             */
+            Fmp4Player.prototype.checkFirstData = function () {
+               try {
+                  if (this.sb.buffered.length > 0) {
+                     this.sawData = true;
+                     if (this.warnedEmpty) clearFatal();
+                     return;
+                  }
+                  if (!this.warnedEmpty && this.appends >= FMP4_CONFIG.emptyAppendsFatal) {
+                     this.warnedEmpty = true;
+                     showFatal("TV không giải mã được luồng fMP4");
+                  }
                } catch (e) {}
             };
 
@@ -660,26 +672,7 @@
 
                this.sb.addEventListener("updateend", function () {
                   self.appends++;
-                  // 🔴 Ca đã cắn một lần (22/09/2026): byte về đều, appendBuffer KHÔNG ném lỗi nào,
-                  // nhưng `buffered` rỗng vĩnh viễn và readyState kẹt 0 — màn hình đen không dấu vết.
-                  // Nguyên nhân hôm đó: `+frag_every_frame` sinh moof ĐƠN-TRACK xen kẽ (video/tiếng)
-                  // nên Chrome MSE không dựng nổi timeline. Không tầng nào báo lỗi ⇒ phải tự hỏi.
-                  try {
-                     var nb = self.sb.buffered.length;
-                     if (self.appends <= 3 || self.appends === 10) {
-                        log("append #" + self.appends + " (" + (self.bytesIn / 1024).toFixed(0) +
-                           "KB) ⇒ buffered=" +
-                           (nb ? self.sb.buffered.end(nb - 1).toFixed(2) + "s" : "RỖNG"));
-                     }
-                     if (!self.warnedEmpty && self.appends >= 12 && nb === 0) {
-                        self.warnedEmpty = true;
-                        log("🔴 ĐÃ APPEND " + self.appends + " lần / " +
-                           (self.bytesIn / 1024).toFixed(0) + "KB mà buffered VẪN RỖNG");
-                        log("🔴 MSE không parse được media segment. Nghi: moof đơn-track xen kẽ " +
-                           "(-movflags phía app), hoặc codec string lệch bitstream thật.");
-                        showFatal("TV không giải mã được luồng fMP4");
-                     }
-                  } catch (e) {}
+                  if (!self.sawData) self.checkFirstData();
                   self.appendNext();
                   self.trimBackBuffer(false);
                });
@@ -838,7 +831,6 @@
             function startFmp4(url) {
                video.style.objectFit = "cover";
                diag.mode = "fMP4/MSE";
-               reportDeviceCapability();
 
                if (!window.fetch || !window.ReadableStream || !window.MediaSource) {
                   activeBranch = null;
@@ -976,12 +968,15 @@
                }
             }, 500);
 
-            window.addEventListener("error", function (e) {
-               log("🔴 JS ERROR: " + (e.message || e) + " @" + (e.lineno || "?"));
-            });
-            window.addEventListener("unhandledrejection", function (e) {
-               log("🔴 PROMISE REJECT: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
-            });
+            // Hai lắng nghe này chỉ để ghi log — bản phát hành không đăng ký.
+            if (CONFIG_DIAG.DEBUG_OVERLAY) {
+               window.addEventListener("error", function (e) {
+                  log("🔴 JS ERROR: " + (e.message || e) + " @" + (e.lineno || "?"));
+               });
+               window.addEventListener("unhandledrejection", function (e) {
+                  log("🔴 PROMISE REJECT: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+               });
+            }
 
             log("receiver khởi động — bản " + RECEIVER_VERSION);
             context.start({ disableIdleTimeout: true });
