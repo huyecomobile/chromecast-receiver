@@ -902,7 +902,7 @@
                       "  (+" + (Date.now() - T_BOOT) + "ms từ lúc receiver chạy)");
 
                   // Chỉ nhận luồng mirror; media thông thường tiếp tục qua CAF.
-                  if (!/\/stream\.ts(?:[?#]|$)/i.test(url)) return request;
+                 if (!/\/stream\.ts(?:[?#]|$)|:8087\/live\.ts(?:[?#]|$)/i.test(url)) return request;
 
                   // Thiếu/không đọc được contentType ⇒ MPEG-TS. Đó là mặc định của mọi bản app
                   // đang ở ngoài thị trường, và là nhánh đã chạy ổn định.
