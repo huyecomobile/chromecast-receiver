@@ -4,7 +4,16 @@
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>CastDuo</title>
-      <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+      <!--
+         CAF SDK (365 KB JS) CHỈ preload ở đây; thẻ <script> thật nằm cuối <body>, ngay trước script
+         của receiver. Đặt đồng bộ trong <head> như bản cũ thì trang không vẽ được gì cho tới khi
+         SDK tải + chạy xong — TV đen thêm chừng ấy giây sau khi đã chuyển sang receiver này.
+      -->
+      <link
+         rel="preload"
+         as="script"
+         href="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"
+      />
       <!--
          mpegts.js (267 KB) — `defer` là có chủ ý, KHÔNG phải tối ưu vặt.
 
@@ -38,10 +47,15 @@
             width: 100%;
             height: 100%;
          }
+         /* Nền của chính thẻ <img>: bản 48×27 (1 KB) của ảnh Congrats, phóng to thành bản mờ. Hiện
+            ngay khi HTML về — ảnh thật nằm trên Firebase Storage, không cache, mất 1,6–2,7s, và
+            trong lúc đó màn hình từng đen. Đặt trên thẻ <img> chứ không trên <body>: <body> phải
+            giữ đen cho dải letterbox khi video đang phát. */
          #bgImage {
             object-fit: cover;
             z-index: 1;
             transition: opacity 0.3s ease;
+            background: #3f4afe url("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAMKADAAQAAAABAAAAGwAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAGwAwAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMABAQEBAQEBgQEBgkGBgYJDAkJCQkMDwwMDAwMDxIPDw8PDw8SEhISEhISEhUVFRUVFRkZGRkZHBwcHBwcHBwcHP/bAEMBBAUFBwcHDAcHDB0UEBQdHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHf/dAAQAA//aAAwDAQACEQMRAD8AhmmjuMurbZO4PQ/jWVKz5285rMluMA4rt72ztzb3NrZ2drFbw2Mcz3crFpGleISBEy2QSc9OB3r+mJWouKfX8Nv89EfPbnFTuy9eD6VnmdeQwznv6Vv6fodzfWsM6oSJkD/61VHzHaPvLgc9eeOh5wKu/wDCGXZk/wBVgblXBnj6l9nXGOD1I4A5NdX1qhBuM5K/qv8AMyle1ziJXTJrOndRnFdpqnh82lk12qH5XRD84bBYE4ICjsK465Xyw/yKdw2/MM49x716WGrQqaxZwyxCT5Wf/9DzeW5YqMngZx7VSeTzOGJI9CTj8ulQljjGeM1Eh5r+wI00kfKSZrxKH2rmtm0tGb5QM546Z61l2QBIrsbFV44rxsZVcE7HhY6u4RdhItM3LjFZWo6Z8pOK72EAKCOCKz9RVSh4r56jjZ+1PjoY2ftT/9k=") center / cover no-repeat;
          }
          #bgImage.hidden {
             opacity: 0;
@@ -52,9 +66,9 @@
             z-index: 2;
             background: transparent;
          }
-         /* Vòng chờ từ lúc LOAD tới khung hình đầu. Phải nằm TRÊN <video>: thẻ đó vẽ đen ngay khi
-            đã gắn nguồn mà chưa có khung, che mất ảnh nền. `display: none` khi ẩn để animation không
-            chạy ngầm dưới video suốt phiên mirror trên TV yếu. */
+         /* Vòng chờ từ lúc receiver mở tới khung hình đầu. Phải nằm TRÊN <video>: thẻ đó vẽ đen ngay
+            khi đã gắn nguồn mà chưa có khung, che mất ảnh nền. `display: none` khi ẩn để animation
+            không chạy ngầm dưới video suốt phiên mirror trên TV yếu. */
          #loading {
             display: none;
             position: absolute;
@@ -154,17 +168,21 @@
    <body>
       <img
          id="bgImage"
-         fetchpriority="low"
+         fetchpriority="high"
          decoding="async"
          src="https://firebasestorage.googleapis.com/v0/b/screen-mirroring-49598.firebasestorage.app/o/chrome_success%2FCongratulation.webp?alt=media&token=a4e166d6-6a41-4a18-92b6-8ace521f00e0"
          alt="EcoMirror Background"
       />
       <video id="tvPlayer" playsinline></video>
-      <div id="loading" aria-hidden="true"><div class="ring"></div></div>
+      <!-- Bật sẵn: receiver này chỉ được mở khi bấm Start mirror (CastService định tuyến mọi URL
+           `stream.ts` sang App ID của nó), nên từ lúc trang hiện đã là "đang chờ hình". -->
+      <div id="loading" class="show" aria-hidden="true"><div class="ring"></div></div>
       <div id="fatal" class="hideDebug"></div>
       <div id="stats"></div>
       <div id="debug"></div>
 
+      <!-- Phải đứng NGAY TRƯỚC script receiver: script đó dùng `cast` ở dòng đầu. Đã preload ở <head>. -->
+      <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
       <script>
          (function () {
             "use strict";
@@ -195,7 +213,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-10-01c";
+            var RECEIVER_VERSION = "2026-10-01d";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -214,6 +232,12 @@
             var fatalEl = document.getElementById("fatal");
             var statsEl = document.getElementById("stats");
             var debugEl = document.getElementById("debug");
+
+            // Spinner bật sẵn từ markup. Không LOAD mirror nào tới (sender hỏng, CAF không nạp được)
+            // thì tắt sau hạn này để khỏi xoay mãi. Đặt TRƯỚC dòng `return` dưới vì đúng ca CAF hỏng
+            // là ca cần nó; `!loadSeq` đúng cả khi `return` sớm làm `loadSeq` chưa được gán.
+            var BOOT_LOADING_MAX_MS = 15000;
+            setTimeout(function () { if (!loadSeq) hideLoading(); }, BOOT_LOADING_MAX_MS);
 
             if (typeof cast === "undefined" || !cast.framework) return;
 
