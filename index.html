@@ -52,6 +52,53 @@
             z-index: 2;
             background: transparent;
          }
+         /* Vòng chờ từ lúc LOAD tới khung hình đầu. Phải nằm TRÊN <video>: thẻ đó vẽ đen ngay khi
+            đã gắn nguồn mà chưa có khung, che mất ảnh nền. `display: none` khi ẩn để animation không
+            chạy ngầm dưới video suốt phiên mirror trên TV yếu. */
+         #loading {
+            display: none;
+            position: absolute;
+            /* Dưới khối chữ "Connected successfully / CONGRATS" của ảnh nền (~37–50% chiều cao). */
+            top: 74%;
+            left: 50%;
+            width: 11vmin;
+            height: 11vmin;
+            margin: -5.5vmin 0 0 -5.5vmin;
+            border-radius: 50%;
+            background: rgba(0, 0, 0, 0.45);
+            z-index: 50;
+            pointer-events: none;
+         }
+         /* Chờ 250ms mới hiện: lượt lên hình nhanh không bị chớp vòng xoay. */
+         #loading.show {
+            display: block;
+            animation: loadingFadeIn 0.2s ease 0.25s both;
+         }
+         #loading .ring {
+            position: absolute;
+            top: 2vmin;
+            left: 2vmin;
+            right: 2vmin;
+            bottom: 2vmin;
+            border: 0.7vmin solid rgba(255, 255, 255, 0.25);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: loadingSpin 0.9s linear infinite;
+            will-change: transform;
+         }
+         @keyframes loadingSpin {
+            to {
+               transform: rotate(360deg);
+            }
+         }
+         @keyframes loadingFadeIn {
+            from {
+               opacity: 0;
+            }
+            to {
+               opacity: 1;
+            }
+         }
          /* Thông báo lỗi cuối cùng — KHÔNG phụ thuộc cờ overlay. Không có nó thì mọi hỏng hóc
             của receiver đều hiện ra y hệt nhau: một màn hình đen câm. */
          #fatal {
@@ -113,6 +160,7 @@
          alt="EcoMirror Background"
       />
       <video id="tvPlayer" playsinline></video>
+      <div id="loading" aria-hidden="true"><div class="ring"></div></div>
       <div id="fatal" class="hideDebug"></div>
       <div id="stats"></div>
       <div id="debug"></div>
@@ -132,7 +180,8 @@
              *
              *    Hai nhánh KHÔNG dùng chung một biến điều khiển nào. Mọi hằng số, mọi
              *    `setInterval`, mọi hàm dọn đều nằm trong nhánh của nó. Thứ duy nhất dùng chung là
-             *    thẻ `<video>`, ảnh nền, và `activeBranch` (cho biết nhánh nào đang chạy).
+             *    thẻ `<video>`, ảnh nền, vòng chờ `#loading`, và `activeBranch` (cho biết nhánh nào
+             *    đang chạy).
              *
              *    Luật này sinh ra từ một ca thật: bản 23/09/2026 gộp hai nhánh vào chung một bộ
              *    điều khiển phát, với ngưỡng đuổi live đặt theo fragment fMP4 ~66ms. MPEG-TS có
@@ -146,7 +195,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-10-01b";
+            var RECEIVER_VERSION = "2026-10-01c";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -161,6 +210,7 @@
 
             var video = document.getElementById("tvPlayer");
             var background = document.getElementById("bgImage");
+            var loadingEl = document.getElementById("loading");
             var fatalEl = document.getElementById("fatal");
             var statsEl = document.getElementById("stats");
             var debugEl = document.getElementById("debug");
@@ -212,8 +262,18 @@
                } catch (e) {}
             }
 
+            /** Vòng chờ — CHỈ hiển thị, cùng loại với ảnh nền: không dòng điều khiển nào được đọc nó. */
+            function showLoading() {
+               try { loadingEl.classList.add("show"); } catch (e) {}
+            }
+
+            function hideLoading() {
+               try { loadingEl.classList.remove("show"); } catch (e) {}
+            }
+
             function showFatal(msg) {
                log("🔴 " + msg);
+               hideLoading();
                try {
                   fatalEl.textContent = msg;
                   fatalEl.className = "";
@@ -236,6 +296,7 @@
                else if (branch === "fmp4") stopFmp4();
                diag.mode = "—";
                try { video.playbackRate = 1; } catch (e) {}
+               hideLoading();
                background.classList.remove("hidden");
             }
 
@@ -388,7 +449,10 @@
                try {
                   Promise.resolve(video.play()).then(
                      function () {
-                        if (tsPlayer === player) background.classList.add("hidden");
+                        if (tsPlayer === player) {
+                           background.classList.add("hidden");
+                           hideLoading();
+                        }
                      },
                      function () {
                         stopTsIfCurrent(player);
@@ -801,6 +865,7 @@
                      );
                      playStarted = true;
                      background.classList.add("hidden");
+                     hideLoading();
                   } catch (e) {
                      log("🔴 checkReady: " + e);
                   }
@@ -979,6 +1044,8 @@
                }
                var delay = delays[fmp4Retries++];
                log("⚠️ " + reason + " ⇒ nối lại lần " + fmp4Retries + " sau " + delay + "ms");
+               // Player vừa bị huỷ ⇒ màn hình đen tới khi nối lại xong; watcher ẩn vòng chờ khi có hình.
+               showLoading();
                fmp4RetryTimer = setTimeout(function () {
                   fmp4RetryTimer = null;
                   if (activeBranch === "fmp4") connectFmp4();
@@ -1046,6 +1113,9 @@
 
                   // Chỉ nhận luồng mirror; media thông thường tiếp tục qua CAF.
                   if (!/\/stream\.ts(?:[?#]|$)/i.test(url)) return request;
+
+                  // Từ đây tới khung hình đầu là khoảng màn hình đen — mỗi nhánh tự ẩn khi lên hình.
+                  showLoading();
 
                   // Thiếu/không đọc được contentType ⇒ MPEG-TS. Đó là mặc định của mọi bản app
                   // đang ở ngoài thị trường, và là nhánh đã chạy ổn định.
