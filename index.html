@@ -146,7 +146,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-10-01b";
+            var RECEIVER_VERSION = "2026-09-24c";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -243,8 +243,6 @@
             // rỗng nên lần bắn lại (do `video.load()` trong lúc dọn) là no-op — đúng như bản ổn định.
             video.addEventListener("error", function () {
                if (!activeBranch) return;
-               // fMP4 tự nối lại khi luồng hỏng — cách xử lý nằm trong nhánh của nó (`onFmp4VideoError`).
-               if (activeBranch === "fmp4") { onFmp4VideoError(); return; }
                var err = video.error;
                log("VIDEO ERROR code=" + (err ? err.code : "?") +
                    " msg=" + (err && err.message ? err.message : ""));
@@ -434,37 +432,17 @@
                fastChaseRate: 1.25,   // nấc 2: kéo 0,5s về trong ~2 giây, thay cho một cú nhảy
                hardSeekLag: 1.5,      // chỉ khi trễ quá ngần này mới nhảy thẳng — lúc đó đuổi
                                       // bằng tốc độ sẽ mất quá lâu
-               // 🔴 01/10/2026 — chiều NGƯỢC của vòng đuổi: trễ tụt quá thấp thì phát CHẬM lại để bồi đệm.
-               // Dòng thời gian hình là số khung × 1/30,03s (`-r 1000/33.3` + `+genpts`), không phải đồng
-               // hồ thật: máy sinh dưới 30,03 khung/giây (EcoFps kẹp 30, máy nóng còn ít hơn) thì mỗi giây
-               // TV tiêu nhiều media hơn lượng về ⇒ đệm 0,3s bị ăn dần, vài phút sau một cú xóc nhỏ cũng
-               // đủ đứng hình. Vòng đuổi trước đây chỉ biết tăng tốc nên không bao giờ bồi lại được.
-               refillLag: 0.2,        // lag < ngưỡng này ⇒ ×refillRate, bồi tới liveEdgeOffset mới về ×1
-               refillRate: 0.95,      // bồi 50ms mỗi giây phát; Chrome giữ cao độ nên tai khó nhận ra
                maxBackBufferSec: 3,   // giữ tối đa bao nhiêu giây phía sau currentTime
                trimBatchSec: 2,       // dọn back buffer THEO LÔ ≥2s: mỗi `remove()` chặn lượt append
                                       // kế tiếp tới khi xong, dọn 0,5s một lần là ~2 lần/giây tắc
                                       // nhỏ trên TV yếu
                trimEveryAppends: 10,  // xét dọn mỗi 10 lần append (~1 giây), không phải mỗi lần
                emptyAppendsFatal: 12, // ~1,2 giây byte về mà không giải mã được gì ⇒ báo lỗi
-               // 🔴 01/10/2026 — luồng đứt thì NỐI LẠI thay vì chết hẳn phiên. App (`TsHttpServer`,
-               // `FMP4_RECONNECT_GRACE_MS` = 5s) giữ phiên sau khi TV rớt kết nối; GET mới tự `clear()`
-               // + phát lại init + xin IDR. Tổng các lượt chờ (3,5s) PHẢI gọn trong ân hạn đó.
-               // "Đứt" = LỖI (reader/fetch lỗi, HTTP ≠ 2xx, lỗi <video>). Luồng KẾT THÚC GỌN (`done`) là
-               // điện thoại chủ động dừng — xem `endFmp4FromPhone`.
-               reconnectDelaysMs: [500, 1000, 2000],
-               reconnectHealthyMs: 10000, // chạy khoẻ ngần này thì sự cố sau là chuỗi mới, đếm lại từ 0
-               connectTimeoutMs: 3000,    // fetch chưa có header sau ngần này ⇒ coi như hỏng
             };
 
             var fmp4 = null;
             var fmp4ReadyTimer = null;
             var fmp4ChaseTimer = null;
-            var fmp4Url = null;
-            var fmp4Retries = 0;          // số lượt nối lại liên tiếp đã dùng
-            var fmp4RetryTimer = null;
-            var fmp4ConnSeq = 0;          // vé của lượt kết nối: callback của lượt cũ tự bỏ
-            var fmp4EverPlayed = false;   // lượt LOAD này đã từng có hình — chỉ để chọn câu báo lỗi
 
             /* -------------------- MP4 box parser (tối thiểu) -------------------- */
 
@@ -551,7 +529,6 @@
                this.appends = 0;
                this.warnedEmpty = false;
                this.sawData = false; // đã từng thấy `buffered` có dữ liệu — thôi canh từ đó
-               this.dataAtMs = 0;    // lúc thấy dữ liệu đầu tiên — để biết phiên đã chạy khoẻ bao lâu
             }
 
             Fmp4Player.prototype.concat = function (a, b) {
@@ -624,8 +601,6 @@
                try {
                   if (this.sb.buffered.length > 0) {
                      this.sawData = true;
-                     this.dataAtMs = Date.now();
-                     fmp4EverPlayed = true;
                      if (this.warnedEmpty) clearFatal();
                      return;
                   }
@@ -716,7 +691,7 @@
                   function (res) {
                      if (self.aborted) return;
                      if (res.done) {
-                        if (fmp4 === self) endFmp4FromPhone("nguồn đóng gọn (reader done)");
+                        log("⚠️ nguồn đóng (reader done)");
                         return;
                      }
                      var chunk = new Uint8Array(res.value);
@@ -732,9 +707,7 @@
                      self.pump();
                   },
                   function (err) {
-                     if (self.aborted) return;
-                     log("🔴 reader lỗi: " + err);
-                     if (fmp4 === self) recoverFmp4("reader lỗi: " + err);
+                     if (!self.aborted) log("🔴 reader lỗi: " + err);
                   },
                );
             };
@@ -823,16 +796,11 @@
                         setFmp4Rate(C.fastChaseRate, lag);
                      } else if (lag > C.chaseLag) {
                         setFmp4Rate(C.chaseRate, lag);
-                     } else if (lag < C.refillLag) {
-                        setFmp4Rate(C.refillRate, lag);
-                     } else if (video.playbackRate > 1 && lag < C.chaseLag - C.chaseHysteresis) {
-                        setFmp4Rate(1.0, lag);
-                     } else if (video.playbackRate < 1 && lag >= C.liveEdgeOffset) {
+                     } else if (lag < C.chaseLag - C.chaseHysteresis) {
                         setFmp4Rate(1.0, lag);
                      }
-                     // Còn lại: GIỮ tốc độ hiện tại — trễ ngược ở cả hai chiều. Đang đuổi thì đuổi nốt
-                     // cho qua dải (chaseLag − chaseHysteresis, chaseLag]; đang bồi thì bồi tới
-                     // liveEdgeOffset; đang ×1 thì chưa đủ lý do để đổi.
+                     // Trong dải (chaseLag − chaseHysteresis, chaseLag]: GIỮ tốc độ hiện tại. Đang
+                     // đuổi thì đuổi nốt cho qua hẳn dải; đang ×1 thì chưa đủ lý do để đuổi.
                   } catch (e) {}
                }, 500);
             }
@@ -846,9 +814,6 @@
 
             function stopFmp4() {
                clearFmp4Watchers();
-               if (fmp4RetryTimer) { clearTimeout(fmp4RetryTimer); fmp4RetryTimer = null; }
-               ++fmp4ConnSeq;            // lượt kết nối còn bay của phiên này tự bỏ
-               fmp4Retries = 0;
                var previous = fmp4;
                fmp4 = null;
                diag.fmp4 = null;
@@ -873,151 +838,43 @@
                   return null;
                }
 
-               fmp4Url = url;
-               fmp4Retries = 0;
-               fmp4EverPlayed = false;
                // Một kết nối duy nhất, và nó được DÙNG LUÔN để phát — không thăm dò rồi nối lại.
-               // Chỉ nối lại khi luồng đã đứt (xem `recoverFmp4`).
-               connectFmp4();
-               return null;
-            }
-
-            /** `fetch` có hạn chờ header: điện thoại vừa đổi mạng thì một fetch có thể treo rất lâu. */
-            function fetchFmp4(url) {
-               var ctrl = typeof AbortController === "function" ? new AbortController() : null;
-               var timer = ctrl ? setTimeout(function () {
-                  try { ctrl.abort(); } catch (e) {}
-               }, FMP4_CONFIG.connectTimeoutMs) : null;
-               // Có header là thôi hẹn giờ: huỷ SAU lúc đó là cắt luôn thân luồng đang phát.
-               var settle = function () { if (timer) { clearTimeout(timer); timer = null; } };
-               return fetch(url, ctrl ? { signal: ctrl.signal } : undefined).then(
-                  function (res) { settle(); return res; },
-                  function (err) { settle(); throw err; },
-               );
-            }
-
-            function connectFmp4() {
-               var seq = ++fmp4ConnSeq;
-               var current = function () { return activeBranch === "fmp4" && seq === fmp4ConnSeq; };
-               fetchFmp4(fmp4Url).then(
+               fetch(url).then(
                   function (res) {
-                     if (!current()) { try { res.body.cancel(); } catch (e) {} return; }
+                     if (activeBranch !== "fmp4") { try { res.body.cancel(); } catch (e) {} return; }
                      log("HTTP " + res.status + " content-type=" +
                          (res.headers.get("content-type") || "(trống)"));
-                     if (typeof res.status === "number" && (res.status < 200 || res.status > 299)) {
-                        try { res.body.cancel(); } catch (e) {}
-                        recoverFmp4("HTTP " + res.status);
-                        return;
-                     }
                      var reader = res.body.getReader();
-                     reader.read().then(
-                        function (r) {
-                           if (!current()) { try { reader.cancel(); } catch (e) {} return; }
-                           if (r.done) {
-                              // Đã từng lên hình ⇒ lượt nối lại gặp đúng lúc điện thoại dừng phiên.
-                              // Chưa từng ⇒ cast hỏng ngay từ đầu: báo như bản ổn định.
-                              if (fmp4EverPlayed) {
-                                 endFmp4FromPhone("điện thoại kết thúc luồng ngay khi nối lại");
-                              } else {
-                                 stopAll();
-                                 showFatal("Điện thoại chưa gửi dữ liệu — thử cast lại");
-                              }
-                              return;
-                           }
-                           var first = new Uint8Array(r.value);
-                           // Kiểm chéo bằng byte: "ftyp" ở offset 4 của fMP4
-                           var isFtyp = first.length > 8 &&
-                              first[4] === 0x66 && first[5] === 0x74 &&
-                              first[6] === 0x79 && first[7] === 0x70;
-                           log("byte đầu: " + (isFtyp ? "ftyp ✅ fMP4"
-                              : "0x" + first[0].toString(16) + " ⚠️ không phải ftyp"));
-                           fmp4 = new Fmp4Player(video);
-                           diag.fmp4 = fmp4;
-                           fmp4.start(first, reader);
-                           startFmp4Watchers();
-                        },
-                        function (err) {
-                           if (current()) recoverFmp4("đọc lỗi: " + err);
-                        },
-                     );
+                     reader.read().then(function (r) {
+                        if (activeBranch !== "fmp4") { try { reader.cancel(); } catch (e) {} return; }
+                        if (r.done) {
+                           stopAll();
+                           showFatal("Điện thoại chưa gửi dữ liệu — thử cast lại");
+                           return;
+                        }
+                        var first = new Uint8Array(r.value);
+                        // Kiểm chéo bằng byte: "ftyp" ở offset 4 của fMP4
+                        var isFtyp = first.length > 8 &&
+                           first[4] === 0x66 && first[5] === 0x74 &&
+                           first[6] === 0x79 && first[7] === 0x70;
+                        log("byte đầu: " + (isFtyp ? "ftyp ✅ fMP4"
+                           : "0x" + first[0].toString(16) + " ⚠️ không phải ftyp"));
+                        fmp4 = new Fmp4Player(video);
+                        diag.fmp4 = fmp4;
+                        fmp4.start(first, reader);
+                        startFmp4Watchers();
+                     });
                   },
                   function (err) {
                      // KHÔNG lùi sang mpegts.js ở đây: app đã khai luồng này là fMP4, ép byte fMP4
                      // vào mpegts.js chỉ đổi một lỗi rõ ràng lấy một lỗi khó đọc.
-                     if (current()) recoverFmp4("fetch lỗi: " + err);
+                     if (activeBranch !== "fmp4") return;
+                     stopAll();
+                     showFatal("Không kết nối được tới điện thoại");
+                     log("fetch lỗi: " + err);
                   },
                );
-            }
-
-            /**
-             * Luồng đứt (TCP reset, điện thoại đổi mạng, decoder TV báo lỗi giữa chừng): dựng lại kết
-             * nối thay vì chết hẳn phiên. Hết lượt mới báo lỗi và trả màn hình về trạng thái chờ.
-             *
-             * Watcher KHÔNG dọn ở đây: chúng chỉ đọc `video.buffered` (rỗng trong lúc chờ nên tự đứng
-             * yên), và lượt nối thành công gọi lại `startFmp4Watchers()` — chờ đệm rồi `play()` lại.
-             */
-            function recoverFmp4(reason) {
-               if (activeBranch !== "fmp4") return;
-               var player = fmp4;
-               // Đã chạy khoẻ đủ lâu thì đây là sự cố MỚI, không phải lượt tiếp của chuỗi hỏng cũ.
-               if (player && player.dataAtMs > 0 &&
-                   Date.now() - player.dataAtMs >= FMP4_CONFIG.reconnectHealthyMs) fmp4Retries = 0;
-               ++fmp4ConnSeq;                         // vô hiệu mọi callback còn bay của lượt cũ
-               fmp4 = null;
-               diag.fmp4 = null;
-               if (player) { try { player.destroy(); } catch (e) {} }
-               if (fmp4RetryTimer) { clearTimeout(fmp4RetryTimer); fmp4RetryTimer = null; }
-
-               var delays = FMP4_CONFIG.reconnectDelaysMs;
-               if (fmp4Retries >= delays.length) {
-                  log("🔴 " + reason + " — hết " + delays.length + " lượt nối lại");
-                  var msg = fmp4EverPlayed ? "Mất kết nối tới điện thoại — thử cast lại"
-                                           : "Không kết nối được tới điện thoại";
-                  stopAll();
-                  showFatal(msg);
-                  return;
-               }
-               var delay = delays[fmp4Retries++];
-               log("⚠️ " + reason + " ⇒ nối lại lần " + fmp4Retries + " sau " + delay + "ms");
-               fmp4RetryTimer = setTimeout(function () {
-                  fmp4RetryTimer = null;
-                  if (activeBranch === "fmp4") connectFmp4();
-               }, delay);
-            }
-
-            /**
-             * Điện thoại KẾT THÚC GỌN luồng (chunk cuối của HTTP chunked ⇒ reader `done`): về màn chờ,
-             * không báo lỗi, không nối lại.
-             *
-             * 🔴 Bấm Dừng trên điện thoại KHÔNG gửi lệnh STOP nào qua Cast — receiver chỉ biết qua việc
-             * luồng HTTP kết thúc. Coi `done` là "đứt" (bản 2026-10-01a) thì mọi lần dừng bình thường
-             * đều thành: nối lại 3 lần vào cổng đã đóng ⇒ "Mất kết nối tới điện thoại" sau ~3,5s.
-             *
-             * An toàn để không nối lại: phía điện thoại chỉ kết thúc gọn phản hồi khi phiên đã hết (dừng
-             * phiên, 10 giây không có dữ liệu, FFmpeg ngừng, hoặc lượt đọc đã bị kết nối khác thay — mà
-             * kết nối đó receiver đã bỏ). Đứt thật thì không có chunk cuối: Chrome báo LỖI, không `done`.
-             * App đợi chunk cuối gửi xong rồi mới đóng socket (`TsHttpServer.stopServer`).
-             */
-            function endFmp4FromPhone(reason) {
-               if (activeBranch !== "fmp4") return;
-               log("⏹ " + reason + " — điện thoại đã dừng luồng, về màn chờ");
-               stopAll();
-            }
-
-            /** Lỗi của thẻ <video> khi nhánh fMP4 đang giữ nó — điều phối từ bộ lắng nghe dùng chung. */
-            function onFmp4VideoError() {
-               var err = video.error;
-               // `fmp4` rỗng = đang chờ nối lại hoặc vừa dọn ⇒ lỗi muộn của nguồn cũ. `error` rỗng =
-               // nguồn mới đã nạp sau khi sự kiện được xếp hàng. Cả hai đều không phải của luồng này.
-               if (!fmp4 || !err) return;
-               log("VIDEO ERROR code=" + err.code + " msg=" + (err.message || ""));
-               // MEDIA_ERR_SRC_NOT_SUPPORTED: TV không giải mã nổi định dạng — nối lại cũng vậy.
-               if (err.code === 4) {
-                  stopAll();
-                  showFatal("TV không hỗ trợ định dạng video này");
-                  return;
-               }
-               recoverFmp4("video error code=" + err.code);
+               return null;
             }
 
             /* ══════════════════════ Điều phối LOAD / STOP ══════════════════════ */
@@ -1045,7 +902,7 @@
                       "  (+" + (Date.now() - T_BOOT) + "ms từ lúc receiver chạy)");
 
                   // Chỉ nhận luồng mirror; media thông thường tiếp tục qua CAF.
-                  if (!/\/stream\.ts(?:[?#]|$)/i.test(url)) return request;
+                 if (!/\/stream\.ts(?:[?#]|$)|:8087\/live\.ts(?:[?#]|$)/i.test(url)) return request;
 
                   // Thiếu/không đọc được contentType ⇒ MPEG-TS. Đó là mặc định của mọi bản app
                   // đang ở ngoài thị trường, và là nhánh đã chạy ổn định.
