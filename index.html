@@ -170,7 +170,7 @@
          id="bgImage"
          fetchpriority="high"
          decoding="async"
-         src="https://firebasestorage.googleapis.com/v0/b/screen-mirroring-49598.firebasestorage.app/o/chrome_success%2FCongratulation.webp?alt=media&token=a4e166d6-6a41-4a18-92b6-8ace521f00e0"
+         src="https://firebasestorage.googleapis.com/v0/b/screen-mirroring-49598.firebasestorage.app/o/chrome_success%2FCongratulation.webp?alt=media&token=64d89df8-8bf6-4b75-8785-d5e55565cc7e"
          alt="EcoMirror Background"
       />
       <video id="tvPlayer" playsinline></video>
@@ -213,7 +213,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-10-01d";
+            var RECEIVER_VERSION = "2026-10-02a";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -1216,7 +1216,11 @@
             }
 
             log("receiver khởi động — bản " + RECEIVER_VERSION);
-            context.start({ disableIdleTimeout: true });
+            // `skipPlayersLoad`: CAF mặc định tự nạp Shaka (769 KB) + MPL (225 KB) lúc khởi động mà
+            // receiver này không phát bằng chúng — trên TV yếu đó là thêm hàng giây tải + biên dịch JS
+            // trong đúng quãng màn hình đen lúc chuyển app. Đánh đổi: đường "nhường CAF" (mpegts.js không
+            // tải được) không còn trình phát — đường đó vốn đã hiện lỗi trước khi nhường.
+            context.start({ disableIdleTimeout: true, skipPlayersLoad: true });
          })();
       </script>
    </body>
