@@ -213,7 +213,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-10-05c";
+            var RECEIVER_VERSION = "2026-10-05d";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -571,6 +571,13 @@
                refillRate: 0.97,        // đường FFmpeg vẫn hụt dòng thời gian dần (số khung × 33,3ms) ⇒ còn cần bồi
                hardSeekOverSec: 1.5,    // đáy lag > đích + ngần này mới nhảy: seek = giải mã lại từ IDR, tự nó là giật
                selfSeekIgnoreMs: 1000,  // sau seek của chính receiver: đứng là do seek, không nâng đích
+               // Nhảy bắt kịp: mất mạng ⇒ đứng ⇒ phần dồn ở điện thoại xả sang TRONG VÀI GIÂY SAU khi hình chạy lại
+               // ⇒ lag 2,5–4,8s kéo dài ~20s nếu chỉ đuổi ×1,05/×1,1 (log TV 05/10). Sau mỗi lần đứng, trong
+               // `catchUpWindowMs`: lag dư > đích + `catchUpOverSec` VÀ đã thôi tăng (xả xong) ⇒ nhảy về đích. Nhịp
+               // giải mã ~0,2s của cú nhảy gộp vào chính lần đứng vừa rồi; nhảy khi còn đang xả là phải nhảy lại.
+               catchUpWindowMs: 8000,
+               catchUpOverSec: 0.5,
+               catchUpStableSec: 0.15,  // lag tăng < ngần này trong 1s gần nhất = đã xả xong
                rescueAfterMs: 1000,     // đứng ≥ ngần này mà đệm vẫn có ⇒ seek về `end − đích`. Seek xả hàng đợi
                                         // của Chrome (ngưỡng về 200ms) nên hình chạy lại ngay; cũng là lối thoát
                                         // duy nhất khi đứng vì khe trong `buffered` / decoder kẹt — chờ là đứng mãi
@@ -996,7 +1003,7 @@
                   target: C.targetBaseSec,
                   lastMs: nowMs, lastCt: video.currentTime, ticks: 0, lags: [],
                   stallFromMs: 0, stallFromCt: 0, stallRate: 1, stallLagBefore: 0, lastRateMs: 0,
-                  lastStallMs: nowMs, lastCheckMs: nowMs, lowWater: Infinity,
+                  lastStallMs: nowMs, lastCheckMs: nowMs, lowWater: Infinity, catchUpUntilMs: 0,
                   ignoreStallUntilMs: nowMs + C.selfSeekIgnoreMs,
                };
             }
@@ -1095,6 +1102,7 @@
                p.lastMs = now;
                p.lastCt = ct;
                if (fmp4Diag) fmp4DiagTick(fmp4Diag, lag, active && !frozen, p.target, now);
+               if (maybeCatchUpFmp4(p, now)) return;
 
                if (now - p.lastCheckMs >= C.checkEverySec * 1000) {
                   p.lastCheckMs = now;
@@ -1114,6 +1122,27 @@
                decideFmp4Rate(p, Math.min.apply(null, p.lags), Math.max.apply(null, p.lags), now);
             }
 
+            /** Trong cửa sổ bắt kịp sau một lần đứng: dư nhiều và đã xả xong ⇒ nhảy về đích. Xem `catchUpWindowMs`. */
+            function maybeCatchUpFmp4(p, now) {
+               var C = FMP4_CONFIG;
+               if (now >= p.catchUpUntilMs || p.stallFromMs || now < p.ignoreStallUntilMs) return false;
+               var n = 1000 / C.tickMs;
+               if (p.lags.length < n) return false;
+               var recent = p.lags.slice(-n);
+               var lagMin = Math.min.apply(null, recent);
+               if (lagMin <= p.target + C.catchUpOverSec) return false;
+               if (recent[recent.length - 1] - recent[0] >= C.catchUpStableSec) return false;
+               log("⏭ bắt kịp: lag " + lagMin.toFixed(2) + "s ⇒ nhảy về đích " + p.target.toFixed(2) + "s");
+               if (fmp4Diag) {
+                  fmp4Diag.seeks++; fmp4Diag.win.seeks++;
+                  reportFmp4Diag("⏭ bắt kịp sau đứng hình: lag " + lagMin.toFixed(2) + "s ⇒ nhảy về đích " +
+                     p.target.toFixed(2) + "s");
+               }
+               seekFmp4NearLive(p, now);
+               setFmp4Rate(1.0, lagMin);
+               return true;
+            }
+
             /** Hình vừa chạy lại sau khi đứng: chấp nhận mức đệm Chrome vừa đòi làm đích mới. */
             function onFmp4Stall(p, lostMs, lagAtResume, now) {
                var C = FMP4_CONFIG;
@@ -1124,6 +1153,7 @@
                p.lastCheckMs = now;
                p.lowWater = Infinity;
                p.lags = [];
+               p.catchUpUntilMs = now + C.catchUpWindowMs;
                diag.fmp4Target = p.target;
                setFmp4Rate(1.0, lagAtResume);
                log("⛔ đứng " + lostMs + "ms ⇒ đích " + before.toFixed(2) + " → " + p.target.toFixed(2) + "s");
@@ -1157,6 +1187,7 @@
                p.lastStallMs = now;
                p.lastCheckMs = now;
                p.lowWater = Infinity;
+               p.catchUpUntilMs = now + C.catchUpWindowMs;
                diag.fmp4Target = p.target;
                seekFmp4NearLive(p, now);
                setFmp4Rate(1.0, lag);
