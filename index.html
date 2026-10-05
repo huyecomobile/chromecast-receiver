@@ -213,7 +213,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-10-05a";
+            var RECEIVER_VERSION = "2026-10-05c";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -291,11 +291,26 @@
                } catch (e) {}
             }
 
-            /** Bật chẩn đoán lúc chạy — gọi khi LOAD mang `?diag=1` (chỉ bản app debug gửi). Một chiều: đã bật
-             *  thì giữ tới khi receiver nạp lại trang. Chỉ đo và hiển thị, không đổi cách phát. */
+            /** Bật chẩn đoán theo từng LOAD — `?diag=1` (chỉ bản app debug gửi). Chỉ đo và hiển thị, không đổi
+             *  cách phát. Lượt LOAD sau không có cờ (bản phát hành cast vào cùng TV) thì tắt lại. */
+            var diagByLoad = false;
+
+            function setDiagForLoad(on) {
+               if (CONFIG_DIAG.DEBUG_OVERLAY) return;
+               if (on) { enableDiag(); return; }
+               if (!diagByLoad) return;
+               diagByLoad = false;
+               diagOn = false;
+               try {
+                  statsEl.className = "hideDebug";
+                  debugEl.className = "hideDebug";
+               } catch (e) {}
+            }
+
             function enableDiag() {
                if (diagOn) return;
                diagOn = true;
+               diagByLoad = true;
                try {
                   statsEl.className = "";
                   debugEl.className = "";
@@ -512,41 +527,53 @@
              */
 
             var FMP4_CONFIG = {
-               // 🔴 24/09/2026 — đổi ưu tiên: MƯỢT trước, TRỄ sau.
+               // 🔴 05/10/2026 — ĐỆM TỰ THÍCH NGHI: thôi đánh nhau với trình phát tiếng của Chrome.
                //
-               // Bản trước giữ đệm 0,15s và nhảy thẳng về live edge khi trễ quá 0,9s — độ trễ đo
-               // được rất đẹp (0,4–0,7s) nhưng đổi lại là "thi thoảng giật một cái": một cú xóc
-               // Wi-Fi 100–300ms là đủ làm cạn 0,15s đệm (hình đứng một nhịp), và một cú dài hơn
-               // là đủ đẩy trễ qua 0,9s (hình nhảy cóc). Hai cú đó là hai kiểu giật khác nhau.
+               // Chrome chỉ phát khi hàng đợi TIẾNG đã giải mã ≥ một ngưỡng (khởi điểm 200ms); mỗi lần
+               // hụt — kể cả hụt một phần — ngưỡng NHÂN ĐÔI tới 3s, chỉ về 200ms khi seek
+               // (`AudioRendererAlgorithm::IncreasePlaybackThreshold` / `FlushBuffers` của Chromium). Bản
+               // 24/09 nhắm đệm 0,3s rồi đuổi ×1,15/×1,25 kéo đệm xuống: hụt ⇒ Chrome dừng hình chờ ngưỡng
+               // gấp đôi ⇒ lag vọt ⇒ đuổi rút đệm ⇒ hụt tiếp, dừng lâu hơn ⇒ lag > 1,5s ⇒ nhảy cóc ⇒ lặp.
+               // Đo trên TV 05/10: đường truyền êm hoàn toàn mà vẫn ~6 lần đổi tốc độ / 10s, nhảy ~mỗi 17s.
                //
-               // Nay đệm 0,3s để nuốt trọn cú xóc thường gặp, và chỉ nhảy khi trễ quá 1,5s — giữa
-               // đó thì ĐUỔI bằng tốc độ phát, hai nấc. Giá: trễ ổn định tăng ~150ms.
+               // Nay: hình ĐỨNG (currentTime không chạy — KHÔNG đòi đệm cạn, Chrome dừng khi `buffered` còn
+               // 0,1–0,3s) ⇒ nâng `đích` lên mức đệm Chrome vừa đòi, xoá cửa sổ lag (⇒ ≥ nửa cửa sổ không đổi
+               // tốc độ: tốc độ ≠ 1 lúc Chrome vừa hụt là hụt tiếp);
+               // mạng yên thì hạ dần. Tốc độ quyết theo ĐÁY và ĐỈNH của lag trong 8s, không theo một mẫu: đuổi
+               // khi cả đáy vẫn dư, bồi khi cả đỉnh vẫn thiếu. Cú xóc thoáng qua chỉ hạ đáy (đỉnh vẫn đủ) ⇒
+               // nằm giữa hai ngưỡng ⇒ không đổi gì. Cửa sổ phải DÀI HƠN chu kỳ xóc: 4s với xóc mỗi 5s thì đáy
+               // "dư" giữa hai cú ⇒ bật ×1,05 rồi tắt mỗi chu kỳ (mô phỏng: 34 lần/2 phút).
                //
-               // 🔴 `chaseLag` QUYẾT ĐỊNH độ trễ ở trạng thái ổn định, không phải `liveEdgeOffset`.
-               // Vòng đuổi chỉ can thiệp khi lag vượt ngưỡng này, nên lag thực tế luôn trôi lên và
-               // đứng quanh khoảng `chaseLag − chaseHysteresis` … `chaseLag`.
-               //
-               // Những con số này CHỈ đúng cho fMP4 (fragment ~100ms, `-frag_duration 100000`) —
-               // đây chính là chỗ bản 23/09 đem áp nhầm cho MPEG-TS và làm chết luồng TS. Đổi
-               // `frag_duration` phía app thì phải chỉnh lại theo.
-               startBufferSec: 0.3,   // PHẢI bằng liveEdgeOffset: thấp hơn thì đệm lúc mới lên
-                                      // hình vẫn mỏng như cũ, chỉ dày sau cú nhảy đầu tiên
-               liveEdgeOffset: 0.3,   // khoảng cách tới live edge khi mở và khi nhảy
-               chaseLag: 0.5,         // lag > ngưỡng này ⇒ bắt đầu đuổi
-               chaseHysteresis: 0.1,  // chỉ về ×1 khi lag < chaseLag − 0,1 — không thì tốc độ bật
-                                      // qua bật lại mỗi 500ms ở sát ngưỡng, bản thân nó là giật
-               chaseRate: 1.15,       // nấc 1: 1.08 kéo 1,0s về 0,35s mất ~8 giây — quá chậm
-               fastChaseLag: 0.8,     // lag > ngưỡng này ⇒ nấc 2
-               fastChaseRate: 1.25,   // nấc 2: kéo 0,5s về trong ~2 giây, thay cho một cú nhảy
-               hardSeekLag: 1.5,      // chỉ khi trễ quá ngần này mới nhảy thẳng — lúc đó đuổi
-                                      // bằng tốc độ sẽ mất quá lâu
-               // 🔴 01/10/2026 — chiều NGƯỢC của vòng đuổi: trễ tụt quá thấp thì phát CHẬM lại để bồi đệm.
-               // Dòng thời gian hình là số khung × 1/30,03s (`-r 1000/33.3` + `+genpts`), không phải đồng
-               // hồ thật: máy sinh dưới 30,03 khung/giây (EcoFps kẹp 30, máy nóng còn ít hơn) thì mỗi giây
-               // TV tiêu nhiều media hơn lượng về ⇒ đệm 0,3s bị ăn dần, vài phút sau một cú xóc nhỏ cũng
-               // đủ đứng hình. Vòng đuổi trước đây chỉ biết tăng tốc nên không bao giờ bồi lại được.
-               refillLag: 0.2,        // lag < ngưỡng này ⇒ ×refillRate, bồi tới liveEdgeOffset mới về ×1
-               refillRate: 0.95,      // bồi 50ms mỗi giây phát; Chrome giữ cao độ nên tai khó nhận ra
+               // Chỉ đúng cho fMP4 (fragment ~100–133ms); đổi `fragmentMinUs` phía app thì xem lại.
+               targetBaseSec: 0.4,      // đích khởi điểm và sàn (05/10: người dùng chọn ưu tiên trễ thấp)
+               targetMaxSec: 1.2,       // trần đích
+               startExtraSec: 0.1,      // mở ở lag = đích + ~một fragment ⇒ đáy răng cưa nằm đúng đích
+               stallStepSec: 0.1,       // mỗi lần đứng hình: đích ≥ đích cũ + ngần này, và ≥ lag lúc phát lại
+               minStallMs: 80,          // đứng ngắn hơn không tính
+               stallAdvanceRatio: 0.3,  // trong một nhịp currentTime chạy < 30% mức kỳ vọng ⇒ đứng
+               calmSec: 20,             // không đứng hình ngần này thì mới xét hạ đích
+               checkEverySec: 10,       // mỗi ngần này xét lại đích theo MỰC ĐỆM THẤP NHẤT quãng vừa qua:
+               nearMissSec: 0.08,       //  - từng tụt dưới ngần này (suýt hụt) ⇒ nâng đích trước khi kịp đứng hình
+               decaySpareSec: 0.2,      //  - luôn dư ≥ ngần này ⇒ mới hạ. Cú xóc bị đệm nuốt trọn vẫn là bằng chứng
+                                        //    mạng còn rung — chỉ đếm lần đứng hình thì hạ vội rồi đứng lại
+               decayStepSec: 0.05,      // 1,2s → 0,4s mất ~3 phút yên ổn
+               tickMs: 100,
+               decideEveryTicks: 5,     // chọn tốc độ mỗi 500ms
+               lagWindowSec: 8,
+               rateHoldSec: 4,          // rời ×1 / đổi giữa hai tốc độ ≠ 1: cách lần đổi trước ≥ ngần này. Về ×1 thì ngay
+               chaseOverSec: 0.25,      // đáy lag > đích + ngần này ⇒ ×chaseRate
+               chaseRate: 1.05,         // nhẹ như nhánh TS — ×1,15/×1,25 cũ tự gây giật và rút đệm quá nhanh
+               fastChaseOverSec: 0.7,
+               fastChaseRate: 1.1,
+               chaseExitOverSec: 0.03,  // đang đuổi: về ×1 khi đáy lag ≤ đích + ngần này — sát đích, vì không còn
+                                        // gì kéo lag xuống nữa (mốc thật không hụt): thoát sớm là trễ dư mãi
+               refillExitOverSec: 0.15, // đỉnh lag < đích ⇒ ×refillRate; về ×1 khi đỉnh ≥ đích + ngần này
+               refillRate: 0.97,        // đường FFmpeg vẫn hụt dòng thời gian dần (số khung × 33,3ms) ⇒ còn cần bồi
+               hardSeekOverSec: 1.5,    // đáy lag > đích + ngần này mới nhảy: seek = giải mã lại từ IDR, tự nó là giật
+               selfSeekIgnoreMs: 1000,  // sau seek của chính receiver: đứng là do seek, không nâng đích
+               rescueAfterMs: 1000,     // đứng ≥ ngần này mà đệm vẫn có ⇒ seek về `end − đích`. Seek xả hàng đợi
+                                        // của Chrome (ngưỡng về 200ms) nên hình chạy lại ngay; cũng là lối thoát
+                                        // duy nhất khi đứng vì khe trong `buffered` / decoder kẹt — chờ là đứng mãi
                maxBackBufferSec: 3,   // giữ tối đa bao nhiêu giây phía sau currentTime
                trimBatchSec: 2,       // dọn back buffer THEO LÔ ≥2s: mỗi `remove()` chặn lượt append
                                       // kế tiếp tới khi xong, dọn 0,5s một lần là ~2 lần/giây tắc
@@ -579,20 +606,12 @@
              * để nằm cùng file logcat với dòng `nhịp` — đối chiếu được phía điện thoại lúc TV khựng.
              */
             var fmp4Diag = null;        // số đo của lượt LOAD này (qua cả các lần nối lại)
-            var fmp4DiagTimer = null;
-            var FMP4_DIAG = {
-               tickMs: 100,
-               reportEveryMs: 10000,
-               // Khựng vì CẠN ĐỆM: trong một nhịp `currentTime` nhích < 30% mức kỳ vọng VÀ đệm còn
-               // ≤ 0,05s. Thiếu điều kiện đệm thì decoder nấc / seek cũng bị đếm nhầm là khựng mạng.
-               stallAdvanceRatio: 0.3,
-               stallLagSec: 0.05,
-            };
+            var FMP4_DIAG = { reportEveryMs: 10000 };
 
             function newFmp4Diag() {
                return {
                   stalls: 0, stallMs: 0, maxStallMs: 0, waiting: 0, rateChanges: 0, seeks: 0,
-                  reconnects: 0, lastDropped: 0, lastTotal: 0, lastBytesIn: 0,
+                  reconnects: 0, lastDropped: 0, lastTotal: 0, lastBytesIn: 0, lastReportMs: 0,
                   win: newFmp4DiagWindow(),
                };
             }
@@ -615,7 +634,7 @@
                } catch (e) {}
             }
 
-            function reportFmp4DiagWindow(d) {
+            function reportFmp4DiagWindow(d, target) {
                var w = d.win;
                var q = null;
                try { q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null; } catch (e) {}
@@ -631,7 +650,7 @@
                reportFmp4Diag(
                   "10s: khựng " + w.stalls + " lần, tổng " + w.stallMs + "ms, dài nhất " + w.maxStallMs + "ms" +
                   " | waiting " + w.waiting +
-                  " | đệm min/tb/max " + lagStr +
+                  " | lag min/tb/max " + lagStr + " | đích " + target.toFixed(2) + "s" +
                   " | đổi tốc độ " + w.rateChanges + ", nhảy " + w.seeks +
                   " | rơi khung " + dropped + "/" + total +
                   " | ×" + video.playbackRate + " | về " + kb + "KB" +
@@ -640,61 +659,29 @@
                d.win = newFmp4DiagWindow();
             }
 
-            /** Vòng 100ms đo khựng — dựng cùng watcher của mỗi lượt kết nối, dọn trong `clearFmp4Watchers`. */
-            function startFmp4DiagTimer(isPlaying) {
-               var d = fmp4Diag;
-               if (!d) return;
-               var lastMs = Date.now();
-               var lastCt = video.currentTime;
-               var recentLags = [];      // ~1s gần nhất — đệm dày bao nhiêu TRƯỚC khi cú xóc ăn cạn
-               var lastReportMs = lastMs;
-               var stallFromMs = 0, stallFromCt = 0, stallLagBefore = 0, stallRate = 1;
-               fmp4DiagTimer = setInterval(function () {
-                  if (activeBranch !== "fmp4" || fmp4Diag !== d) return;
-                  try {
-                     var now = Date.now();
-                     var ct = video.currentTime;
-                     var buf = video.buffered;
-                     var lag = buf.length > 0 ? buf.end(buf.length - 1) - ct : 0;
-                     var expectedMs = (now - lastMs) * video.playbackRate;
-                     var advancedMs = (ct - lastCt) * 1000;
-                     var playing = isPlaying() && !video.paused && expectedMs > 0;
-                     var moving = advancedMs >= FMP4_DIAG.stallAdvanceRatio * expectedMs;
-                     var starved = playing && !moving && lag <= FMP4_DIAG.stallLagSec;
-                     if (starved && !stallFromMs) {
-                        stallFromMs = lastMs;
-                        stallFromCt = lastCt;
-                        stallLagBefore = recentLags.length ? Math.max.apply(null, recentLags) : 0;
-                        stallRate = video.playbackRate || 1;
-                     } else if (stallFromMs && moving) {
-                        // Thời gian mất = giờ thật trôi − giờ media trôi: chính xác hơn độ phân giải 100ms.
-                        var lostMs = Math.round((now - stallFromMs) - (ct - stallFromCt) * 1000 / stallRate);
-                        stallFromMs = 0;
-                        if (lostMs > 0) {
-                           d.stalls++; d.stallMs += lostMs; d.maxStallMs = Math.max(d.maxStallMs, lostMs);
-                           d.win.stalls++; d.win.stallMs += lostMs;
-                           d.win.maxStallMs = Math.max(d.win.maxStallMs, lostMs);
-                           reportFmp4Diag("⛔ khựng " + lostMs + "ms | đệm 1s trước " + stallLagBefore.toFixed(2) +
-                              "s | tốc độ lúc đó ×" + stallRate + " | đệm sau " + lag.toFixed(2) + "s");
-                        }
-                     }
-                     if (playing && isFinite(lag)) {
-                        recentLags.push(lag);
-                        if (recentLags.length > 1000 / FMP4_DIAG.tickMs) recentLags.shift();
-                        var w = d.win;
-                        if (lag < w.lagMin) w.lagMin = lag;
-                        if (lag > w.lagMax) w.lagMax = lag;
-                        w.lagSum += lag;
-                        w.lagN++;
-                     }
-                     lastMs = now;
-                     lastCt = ct;
-                     if (now - lastReportMs >= FMP4_DIAG.reportEveryMs) {
-                        lastReportMs = now;
-                        reportFmp4DiagWindow(d);
-                     }
-                  } catch (e) {}
-               }, FMP4_DIAG.tickMs);
+            /** Gọi mỗi nhịp của `fmp4PaceTick` khi chẩn đoán bật — chỉ ghi số, không quyết định gì. */
+            function fmp4DiagTick(d, lag, playing, target, now) {
+               if (playing && isFinite(lag)) {
+                  var w = d.win;
+                  if (lag < w.lagMin) w.lagMin = lag;
+                  if (lag > w.lagMax) w.lagMax = lag;
+                  w.lagSum += lag;
+                  w.lagN++;
+               }
+               if (!d.lastReportMs) d.lastReportMs = now;
+               if (now - d.lastReportMs >= FMP4_DIAG.reportEveryMs) {
+                  d.lastReportMs = now;
+                  reportFmp4DiagWindow(d, target);
+               }
+            }
+
+            function fmp4DiagStall(d, lostMs, lagBefore, rate, lagAfter, target, how) {
+               d.stalls++; d.stallMs += lostMs; d.maxStallMs = Math.max(d.maxStallMs, lostMs);
+               d.win.stalls++; d.win.stallMs += lostMs; d.win.maxStallMs = Math.max(d.win.maxStallMs, lostMs);
+               reportFmp4Diag("⛔ đứng hình " + lostMs + "ms" + (how ? " (" + how + ")" : "") +
+                  " | lag cao nhất 1s trước " + lagBefore.toFixed(2) +
+                  "s | tốc độ lúc đó ×" + rate + " | lag lúc " + (how ? "nhảy " : "phát lại ") + lagAfter.toFixed(2) +
+                  "s | readyState " + video.readyState + " | đích → " + target.toFixed(2) + "s");
             }
 
             /* -------------------- MP4 box parser (tối thiểu) -------------------- */
@@ -1000,12 +987,24 @@
                // cast lần thứ N là N vòng cùng ghi `currentTime`.
                if (fmp4ReadyTimer) { clearInterval(fmp4ReadyTimer); fmp4ReadyTimer = null; }
                if (fmp4ChaseTimer) { clearInterval(fmp4ChaseTimer); fmp4ChaseTimer = null; }
-               if (fmp4DiagTimer) { clearInterval(fmp4DiagTimer); fmp4DiagTimer = null; }
+            }
+
+            /** Nhịp phát của MỘT lượt kết nối — MediaSource mới thì ngưỡng tiếng của Chrome cũng về 200ms. */
+            function newFmp4Pace(nowMs) {
+               var C = FMP4_CONFIG;
+               return {
+                  target: C.targetBaseSec,
+                  lastMs: nowMs, lastCt: video.currentTime, ticks: 0, lags: [],
+                  stallFromMs: 0, stallFromCt: 0, stallRate: 1, stallLagBefore: 0, lastRateMs: 0,
+                  lastStallMs: nowMs, lastCheckMs: nowMs, lowWater: Infinity,
+                  ignoreStallUntilMs: nowMs + C.selfSeekIgnoreMs,
+               };
             }
 
             function startFmp4Watchers() {
                clearFmp4Watchers();
                var playStarted = false;
+               var pace = null;
 
                fmp4ReadyTimer = setInterval(function () {
                   if (activeBranch !== "fmp4") { clearFmp4Watchers(); return; }
@@ -1014,12 +1013,13 @@
                      if (buf.length === 0) return;
                      var end = buf.end(buf.length - 1);
                      var start = buf.start(0);
-                     if (end - start < FMP4_CONFIG.startBufferSec) return;
+                     var startLag = FMP4_CONFIG.targetBaseSec + FMP4_CONFIG.startExtraSec;
+                     if (end - start < startLag) return;
 
                      clearInterval(fmp4ReadyTimer);
                      fmp4ReadyTimer = null;
 
-                     var target = Math.max(end - FMP4_CONFIG.liveEdgeOffset, start);
+                     var target = Math.max(end - startLag, start);
                      try { video.currentTime = target; } catch (e) {}
                      video.muted = false;
                      video.volume = 1.0;
@@ -1032,6 +1032,8 @@
                         function (e) { log("🔴 play() từ chối: " + e); },
                      );
                      playStarted = true;
+                     pace = newFmp4Pace(Date.now());
+                     diag.fmp4Target = pace.target;
                      background.classList.add("hidden");
                      hideLoading();
                   } catch (e) {
@@ -1041,36 +1043,162 @@
 
                fmp4ChaseTimer = setInterval(function () {
                   if (activeBranch !== "fmp4") { clearFmp4Watchers(); return; }
-                  if (!playStarted) return;
-                  try {
-                     var buf = video.buffered;
-                     if (buf.length === 0) return;
-                     var end = buf.end(buf.length - 1);
-                     var lag = end - video.currentTime;
-                     var C = FMP4_CONFIG;
-                     if (lag > C.hardSeekLag) {
-                        video.currentTime = end - C.liveEdgeOffset;
-                        setFmp4Rate(1.0, lag);
-                        log("⏩ lag " + lag.toFixed(2) + "s ⇒ nhảy live edge");
-                        if (fmp4Diag) { fmp4Diag.seeks++; fmp4Diag.win.seeks++; }
-                     } else if (lag > C.fastChaseLag) {
-                        setFmp4Rate(C.fastChaseRate, lag);
-                     } else if (lag > C.chaseLag) {
-                        setFmp4Rate(C.chaseRate, lag);
-                     } else if (lag < C.refillLag) {
-                        setFmp4Rate(C.refillRate, lag);
-                     } else if (video.playbackRate > 1 && lag < C.chaseLag - C.chaseHysteresis) {
-                        setFmp4Rate(1.0, lag);
-                     } else if (video.playbackRate < 1 && lag >= C.liveEdgeOffset) {
-                        setFmp4Rate(1.0, lag);
-                     }
-                     // Còn lại: GIỮ tốc độ hiện tại — trễ ngược ở cả hai chiều. Đang đuổi thì đuổi nốt
-                     // cho qua dải (chaseLag − chaseHysteresis, chaseLag]; đang bồi thì bồi tới
-                     // liveEdgeOffset; đang ×1 thì chưa đủ lý do để đổi.
-                  } catch (e) {}
-               }, 500);
+                  if (!playStarted || !pace) return;
+                  try { fmp4PaceTick(pace); } catch (e) {}
+               }, FMP4_CONFIG.tickMs);
+            }
 
-               startFmp4DiagTimer(function () { return playStarted; });
+            /**
+             * Một nhịp: đo đứng hình, cập nhật `đích`, và (mỗi `decideEveryTicks`) chọn tốc độ phát.
+             * Đứng hình KHÔNG đòi đệm cạn — xem đầu `FMP4_CONFIG`.
+             */
+            function fmp4PaceTick(p) {
+               var C = FMP4_CONFIG;
+               var now = Date.now();
+               var buf = video.buffered;
+               var ct = video.currentTime;
+               if (buf.length === 0) { p.lastMs = now; p.lastCt = ct; return; }
+               var end = buf.end(buf.length - 1);
+               var lag = end - ct;
+               var rate = video.playbackRate || 1;
+               var expectedMs = (now - p.lastMs) * rate;
+               var moving = (ct - p.lastCt) * 1000 >= C.stallAdvanceRatio * expectedMs;
+               var active = !video.paused && !video.seeking && expectedMs > 0;
+               var frozen = active && !moving && now >= p.ignoreStallUntilMs;
+
+               if (frozen && !p.stallFromMs) {
+                  p.stallFromMs = p.lastMs;
+                  p.stallFromCt = p.lastCt;
+                  p.stallRate = rate;
+                  var recent = p.lags.slice(-1000 / C.tickMs);
+                  p.stallLagBefore = recent.length ? Math.max.apply(null, recent) : lag;
+               } else if (p.stallFromMs && !frozen) {
+                  var from = p.stallFromMs;
+                  p.stallFromMs = 0;
+                  if (active && moving) {
+                     // Thời gian mất = giờ thật trôi − giờ media trôi: chính xác hơn độ phân giải 100ms.
+                     var lostMs = Math.round((now - from) - (ct - p.stallFromCt) * 1000 / p.stallRate);
+                     if (lostMs >= C.minStallMs) onFmp4Stall(p, lostMs, lag, now);
+                  }
+               }
+
+               if (p.stallFromMs && now - p.stallFromMs >= C.rescueAfterMs && lag >= p.target + 0.1) {
+                  rescueFmp4Stall(p, Math.round(now - p.stallFromMs), lag, now);
+                  return;
+               }
+
+               if (active && !frozen) {
+                  if (lag < p.lowWater) p.lowWater = lag;
+                  p.lags.push(lag);
+                  if (p.lags.length > C.lagWindowSec * 1000 / C.tickMs) p.lags.shift();
+               }
+               p.lastMs = now;
+               p.lastCt = ct;
+               if (fmp4Diag) fmp4DiagTick(fmp4Diag, lag, active && !frozen, p.target, now);
+
+               if (now - p.lastCheckMs >= C.checkEverySec * 1000) {
+                  p.lastCheckMs = now;
+                  if (p.lowWater < C.nearMissSec) {
+                     p.target = Math.min(C.targetMaxSec, p.target + C.stallStepSec);
+                  } else if (p.target > C.targetBaseSec && now - p.lastStallMs >= C.calmSec * 1000 &&
+                             p.lowWater >= C.decaySpareSec) {
+                     p.target = Math.max(C.targetBaseSec, p.target - C.decayStepSec);
+                  }
+                  p.lowWater = Infinity;
+                  diag.fmp4Target = p.target;
+               }
+
+               if (++p.ticks % C.decideEveryTicks !== 0) return;
+               // Cửa sổ vừa bị xoá (khởi động, đứng hình, nhảy) ⇒ chờ đầy một nửa mới quyết.
+               if (p.stallFromMs || p.lags.length * C.tickMs < C.lagWindowSec * 1000 / 2) return;
+               decideFmp4Rate(p, Math.min.apply(null, p.lags), Math.max.apply(null, p.lags), now);
+            }
+
+            /** Hình vừa chạy lại sau khi đứng: chấp nhận mức đệm Chrome vừa đòi làm đích mới. */
+            function onFmp4Stall(p, lostMs, lagAtResume, now) {
+               var C = FMP4_CONFIG;
+               var before = p.target;
+               p.target = Math.min(C.targetMaxSec,
+                  Math.max(C.targetBaseSec, p.target + C.stallStepSec, lagAtResume));
+               p.lastStallMs = now;
+               p.lastCheckMs = now;
+               p.lowWater = Infinity;
+               p.lags = [];
+               diag.fmp4Target = p.target;
+               setFmp4Rate(1.0, lagAtResume);
+               log("⛔ đứng " + lostMs + "ms ⇒ đích " + before.toFixed(2) + " → " + p.target.toFixed(2) + "s");
+               if (fmp4Diag) fmp4DiagStall(fmp4Diag, lostMs, p.stallLagBefore, p.stallRate, lagAtResume, p.target);
+            }
+
+            /**
+             * Seek về `đích` sau live edge — không lùi quá đầu đoạn `buffered` cuối: đoạn cuối ngắn hơn `đích`
+             * (vừa qua một khe) mà seek vào khe là Chrome đứng ở `seeking` mãi.
+             */
+            function seekFmp4NearLive(p, now) {
+               var buf = video.buffered;
+               var last = buf.length - 1;
+               video.currentTime = Math.max(buf.end(last) - p.target, buf.start(last));
+               p.lags = [];
+               p.ignoreStallUntilMs = now + FMP4_CONFIG.selfSeekIgnoreMs;
+               p.lastMs = now;
+               p.lastCt = video.currentTime;
+            }
+
+            /**
+             * Đứng quá `rescueAfterMs` dù đệm vẫn có: đừng chờ Chrome nữa — ngưỡng của nó có thể đã bị nhân đôi
+             * tới 1,6–3s, hoặc nó kẹt ở khe và sẽ không bao giờ tự chạy. Seek về `end − đích` (bỏ qua phần trễ dư)
+             * rồi nâng đích một nấc, vì lần hụt dẫn tới đây vẫn là bằng chứng đệm mỏng.
+             */
+            function rescueFmp4Stall(p, lostMs, lag, now) {
+               var C = FMP4_CONFIG;
+               var before = p.target;
+               p.stallFromMs = 0;
+               p.target = Math.min(C.targetMaxSec, p.target + C.stallStepSec);
+               p.lastStallMs = now;
+               p.lastCheckMs = now;
+               p.lowWater = Infinity;
+               diag.fmp4Target = p.target;
+               seekFmp4NearLive(p, now);
+               setFmp4Rate(1.0, lag);
+               log("🛟 đứng " + lostMs + "ms vẫn chưa chạy (lag " + lag.toFixed(2) + "s) ⇒ nhảy, đích " +
+                   before.toFixed(2) + " → " + p.target.toFixed(2) + "s");
+               if (fmp4Diag) {
+                  fmp4Diag.seeks++; fmp4Diag.win.seeks++;
+                  fmp4DiagStall(fmp4Diag, lostMs, p.stallLagBefore, p.stallRate, lag, p.target, "nhảy cứu");
+               }
+            }
+
+            /**
+             * Chọn tốc độ theo đáy (`lagMin`) và đỉnh (`lagMax`) của lag trong `lagWindowSec` so với `đích`.
+             * Trễ ngược ở cả hai chiều; giữa hai ngưỡng thì giữ nguyên tốc độ đang có.
+             */
+            function decideFmp4Rate(p, lagMin, lagMax, now) {
+               var C = FMP4_CONFIG;
+               var t = p.target;
+               var rate = video.playbackRate;
+               if (lagMin > t + C.hardSeekOverSec) {
+                  seekFmp4NearLive(p, now);
+                  setFmp4Rate(1.0, lagMin);
+                  log("⏩ đáy lag " + lagMin.toFixed(2) + "s ⇒ nhảy về đích " + t.toFixed(2) + "s");
+                  if (fmp4Diag) { fmp4Diag.seeks++; fmp4Diag.win.seeks++; }
+                  return;
+               }
+               var chase = lagMin > t + C.fastChaseOverSec ? C.fastChaseRate : C.chaseRate;
+               var want = rate;
+               if (rate > 1) {
+                  want = lagMin <= t + C.chaseExitOverSec ? 1.0 : chase;
+               } else if (lagMin > t + C.chaseOverSec) {
+                  want = chase;
+               } else if (rate < 1) {
+                  if (lagMax >= t + C.refillExitOverSec) want = 1.0;
+               } else if (lagMax < t) {
+                  want = C.refillRate;
+               }
+               if (want === rate) return;
+               // Về ×1 luôn được phép ngay — giữ đuổi/bồi thêm vài giây lúc lag đang tụt là rút đệm đúng lúc nguy.
+               if (want !== 1.0 && now - p.lastRateMs < C.rateHoldSec * 1000) return;
+               p.lastRateMs = now;
+               setFmp4Rate(want, want < 1 ? lagMax : lagMin);
             }
 
             /** Đổi tốc độ phát của nhánh fMP4 — chỉ khi khác, và ghi log để đối chiếu với lúc giật. */
@@ -1091,6 +1219,7 @@
                diag.fmp4 = null;
                fmp4Diag = null;
                diag.fmp4Diag = null;
+               diag.fmp4Target = null;
                if (previous) {
                   try { previous.destroy(); } catch (e) {}
                }
@@ -1287,7 +1416,7 @@
 
                   var ticket = ++loadSeq;
                   var url = request.media.contentId || "";
-                  if (/[?&]diag=1(?:[&#]|$)/.test(url)) enableDiag();
+                  setDiagForLoad(/[?&]diag=1(?:[&#]|$)/.test(url));
                   var ct = (request.media.contentType || "").toLowerCase();
                   log("LOAD ⇒ " + url + "  type=" + ct +
                       "  (+" + (Date.now() - T_BOOT) + "ms từ lúc receiver chạy)");
@@ -1345,7 +1474,8 @@
                      statsEl.textContent =
                         "mode       " + diag.mode + "\n" +
                         "branch     " + (activeBranch || "—") + "\n" +
-                        "LAG(live)  " + lagStr + (v.playbackRate !== 1 ? "  ⏩đuổi" : "") + "\n" +
+                        "LAG(live)  " + lagStr + (v.playbackRate > 1 ? "  ⏩đuổi" : v.playbackRate < 1 ? "  ⏪bồi" : "") + "\n" +
+                        (diag.fmp4Target ? "đích       " + diag.fmp4Target.toFixed(2) + "s\n" : "") +
                         "lag avg    " + lagAvg + "  (" + lagMin + "–" + lagMax + ")\n" +
                         "buffer     " + bufStr + "\n" +
                         "curTime    " + v.currentTime.toFixed(2) + "\n" +
