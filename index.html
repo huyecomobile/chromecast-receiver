@@ -213,7 +213,7 @@
              * thừa và hai client chia byte của nhau.
              * ═══════════════════════════════════════════════════════════════════════════════ */
 
-            var RECEIVER_VERSION = "2026-10-02a";
+            var RECEIVER_VERSION = "2026-10-05a";
             // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
             // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
             var T_BOOT = Date.now();
@@ -261,7 +261,12 @@
             var statsErrShown = false;
             var lagHist = [];
 
-            if (!CONFIG_DIAG.DEBUG_OVERLAY) {
+            /** Chẩn đoán đang bật: cờ build `DEBUG_OVERLAY`, HOẶC lệnh LOAD của bản app debug mang
+             *  `?diag=1` (xem `enableDiag`). Bản app phát hành không gửi cờ ⇒ receiver chạy y như cũ. */
+            var diagOn = CONFIG_DIAG.DEBUG_OVERLAY;
+            var diagOverlayStarted = false;
+
+            if (!diagOn) {
                statsEl.className = "hideDebug";
                debugEl.className = "hideDebug";
             }
@@ -277,13 +282,26 @@
 
             /** Nhật ký chẩn đoán — KHÔNG làm gì ở bản phát hành. Bật `DEBUG_OVERLAY` khi cần truy lỗi. */
             function log(msg) {
-               if (!CONFIG_DIAG.DEBUG_OVERLAY) return;
+               if (!diagOn) return;
                try {
                   logLines.push(ts2() + "  " + msg);
                   if (logLines.length > MAX_LOG_LINES) logLines.shift();
                   debugEl.textContent = logLines.join("\n");
                   console.log("[CastDuo] " + msg);
                } catch (e) {}
+            }
+
+            /** Bật chẩn đoán lúc chạy — gọi khi LOAD mang `?diag=1` (chỉ bản app debug gửi). Một chiều: đã bật
+             *  thì giữ tới khi receiver nạp lại trang. Chỉ đo và hiển thị, không đổi cách phát. */
+            function enableDiag() {
+               if (diagOn) return;
+               diagOn = true;
+               try {
+                  statsEl.className = "";
+                  debugEl.className = "";
+               } catch (e) {}
+               startDiagOverlay();
+               log("chẩn đoán bật theo LOAD (?diag=1) — bản " + RECEIVER_VERSION);
             }
 
             /** Vòng chờ — CHỈ hiển thị, cùng loại với ảnh nền: không dòng điều khiển nào được đọc nó. */
@@ -553,6 +571,131 @@
             var fmp4RetryTimer = null;
             var fmp4ConnSeq = 0;          // vé của lượt kết nối: callback của lượt cũ tự bỏ
             var fmp4EverPlayed = false;   // lượt LOAD này đã từng có hình — chỉ để chọn câu báo lỗi
+
+            /* ── Đo khựng hình — CHỈ khi `diagOn` (2026-10-05) ───────────────────────────────────
+             *
+             * Chỉ ĐO, không điều khiển: không dòng điều khiển nào đọc `fmp4Diag`. Mỗi ~10 giây và mỗi
+             * lần khựng, một dòng tóm tắt được gửi về điện thoại (`/diag` của `TsHttpServer`, bản debug)
+             * để nằm cùng file logcat với dòng `nhịp` — đối chiếu được phía điện thoại lúc TV khựng.
+             */
+            var fmp4Diag = null;        // số đo của lượt LOAD này (qua cả các lần nối lại)
+            var fmp4DiagTimer = null;
+            var FMP4_DIAG = {
+               tickMs: 100,
+               reportEveryMs: 10000,
+               // Khựng vì CẠN ĐỆM: trong một nhịp `currentTime` nhích < 30% mức kỳ vọng VÀ đệm còn
+               // ≤ 0,05s. Thiếu điều kiện đệm thì decoder nấc / seek cũng bị đếm nhầm là khựng mạng.
+               stallAdvanceRatio: 0.3,
+               stallLagSec: 0.05,
+            };
+
+            function newFmp4Diag() {
+               return {
+                  stalls: 0, stallMs: 0, maxStallMs: 0, waiting: 0, rateChanges: 0, seeks: 0,
+                  reconnects: 0, lastDropped: 0, lastTotal: 0, lastBytesIn: 0,
+                  win: newFmp4DiagWindow(),
+               };
+            }
+
+            function newFmp4DiagWindow() {
+               return {
+                  stalls: 0, stallMs: 0, maxStallMs: 0, waiting: 0, rateChanges: 0, seeks: 0,
+                  lagMin: Infinity, lagMax: -Infinity, lagSum: 0, lagN: 0,
+               };
+            }
+
+            /** Ghi log trên TV và gửi về điện thoại. Lỗi mạng nuốt im: chẩn đoán không được làm hỏng phát. */
+            function reportFmp4Diag(line) {
+               log("📊 " + line);
+               if (!fmp4Url) return;
+               try {
+                  var base = fmp4Url.replace(/\/stream\.ts.*$/i, "");
+                  fetch(base + "/diag?m=" + encodeURIComponent(line), { mode: "no-cors", cache: "no-store" })
+                     .catch(function () {});
+               } catch (e) {}
+            }
+
+            function reportFmp4DiagWindow(d) {
+               var w = d.win;
+               var q = null;
+               try { q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null; } catch (e) {}
+               var dropped = q ? q.droppedVideoFrames - d.lastDropped : -1;
+               var total = q ? q.totalVideoFrames - d.lastTotal : -1;
+               if (q) { d.lastDropped = q.droppedVideoFrames; d.lastTotal = q.totalVideoFrames; }
+               var bytesIn = fmp4 ? fmp4.bytesIn : 0;
+               var kb = Math.max(0, Math.round((bytesIn - d.lastBytesIn) / 1024));
+               d.lastBytesIn = bytesIn;
+               var lagStr = w.lagN > 0
+                  ? w.lagMin.toFixed(2) + "/" + (w.lagSum / w.lagN).toFixed(2) + "/" + w.lagMax.toFixed(2) + "s"
+                  : "—";
+               reportFmp4Diag(
+                  "10s: khựng " + w.stalls + " lần, tổng " + w.stallMs + "ms, dài nhất " + w.maxStallMs + "ms" +
+                  " | waiting " + w.waiting +
+                  " | đệm min/tb/max " + lagStr +
+                  " | đổi tốc độ " + w.rateChanges + ", nhảy " + w.seeks +
+                  " | rơi khung " + dropped + "/" + total +
+                  " | ×" + video.playbackRate + " | về " + kb + "KB" +
+                  " | cộng dồn: khựng " + d.stalls + " lần/" + d.stallMs + "ms, nối lại " + d.reconnects
+               );
+               d.win = newFmp4DiagWindow();
+            }
+
+            /** Vòng 100ms đo khựng — dựng cùng watcher của mỗi lượt kết nối, dọn trong `clearFmp4Watchers`. */
+            function startFmp4DiagTimer(isPlaying) {
+               var d = fmp4Diag;
+               if (!d) return;
+               var lastMs = Date.now();
+               var lastCt = video.currentTime;
+               var recentLags = [];      // ~1s gần nhất — đệm dày bao nhiêu TRƯỚC khi cú xóc ăn cạn
+               var lastReportMs = lastMs;
+               var stallFromMs = 0, stallFromCt = 0, stallLagBefore = 0, stallRate = 1;
+               fmp4DiagTimer = setInterval(function () {
+                  if (activeBranch !== "fmp4" || fmp4Diag !== d) return;
+                  try {
+                     var now = Date.now();
+                     var ct = video.currentTime;
+                     var buf = video.buffered;
+                     var lag = buf.length > 0 ? buf.end(buf.length - 1) - ct : 0;
+                     var expectedMs = (now - lastMs) * video.playbackRate;
+                     var advancedMs = (ct - lastCt) * 1000;
+                     var playing = isPlaying() && !video.paused && expectedMs > 0;
+                     var moving = advancedMs >= FMP4_DIAG.stallAdvanceRatio * expectedMs;
+                     var starved = playing && !moving && lag <= FMP4_DIAG.stallLagSec;
+                     if (starved && !stallFromMs) {
+                        stallFromMs = lastMs;
+                        stallFromCt = lastCt;
+                        stallLagBefore = recentLags.length ? Math.max.apply(null, recentLags) : 0;
+                        stallRate = video.playbackRate || 1;
+                     } else if (stallFromMs && moving) {
+                        // Thời gian mất = giờ thật trôi − giờ media trôi: chính xác hơn độ phân giải 100ms.
+                        var lostMs = Math.round((now - stallFromMs) - (ct - stallFromCt) * 1000 / stallRate);
+                        stallFromMs = 0;
+                        if (lostMs > 0) {
+                           d.stalls++; d.stallMs += lostMs; d.maxStallMs = Math.max(d.maxStallMs, lostMs);
+                           d.win.stalls++; d.win.stallMs += lostMs;
+                           d.win.maxStallMs = Math.max(d.win.maxStallMs, lostMs);
+                           reportFmp4Diag("⛔ khựng " + lostMs + "ms | đệm 1s trước " + stallLagBefore.toFixed(2) +
+                              "s | tốc độ lúc đó ×" + stallRate + " | đệm sau " + lag.toFixed(2) + "s");
+                        }
+                     }
+                     if (playing && isFinite(lag)) {
+                        recentLags.push(lag);
+                        if (recentLags.length > 1000 / FMP4_DIAG.tickMs) recentLags.shift();
+                        var w = d.win;
+                        if (lag < w.lagMin) w.lagMin = lag;
+                        if (lag > w.lagMax) w.lagMax = lag;
+                        w.lagSum += lag;
+                        w.lagN++;
+                     }
+                     lastMs = now;
+                     lastCt = ct;
+                     if (now - lastReportMs >= FMP4_DIAG.reportEveryMs) {
+                        lastReportMs = now;
+                        reportFmp4DiagWindow(d);
+                     }
+                  } catch (e) {}
+               }, FMP4_DIAG.tickMs);
+            }
 
             /* -------------------- MP4 box parser (tối thiểu) -------------------- */
 
@@ -857,6 +1000,7 @@
                // cast lần thứ N là N vòng cùng ghi `currentTime`.
                if (fmp4ReadyTimer) { clearInterval(fmp4ReadyTimer); fmp4ReadyTimer = null; }
                if (fmp4ChaseTimer) { clearInterval(fmp4ChaseTimer); fmp4ChaseTimer = null; }
+               if (fmp4DiagTimer) { clearInterval(fmp4DiagTimer); fmp4DiagTimer = null; }
             }
 
             function startFmp4Watchers() {
@@ -908,6 +1052,7 @@
                         video.currentTime = end - C.liveEdgeOffset;
                         setFmp4Rate(1.0, lag);
                         log("⏩ lag " + lag.toFixed(2) + "s ⇒ nhảy live edge");
+                        if (fmp4Diag) { fmp4Diag.seeks++; fmp4Diag.win.seeks++; }
                      } else if (lag > C.fastChaseLag) {
                         setFmp4Rate(C.fastChaseRate, lag);
                      } else if (lag > C.chaseLag) {
@@ -924,6 +1069,8 @@
                      // liveEdgeOffset; đang ×1 thì chưa đủ lý do để đổi.
                   } catch (e) {}
                }, 500);
+
+               startFmp4DiagTimer(function () { return playStarted; });
             }
 
             /** Đổi tốc độ phát của nhánh fMP4 — chỉ khi khác, và ghi log để đối chiếu với lúc giật. */
@@ -931,6 +1078,7 @@
                if (video.playbackRate === rate) return;
                video.playbackRate = rate;
                log("tốc độ ×" + rate + " (lag " + lag.toFixed(2) + "s)");
+               if (fmp4Diag) { fmp4Diag.rateChanges++; fmp4Diag.win.rateChanges++; }
             }
 
             function stopFmp4() {
@@ -941,6 +1089,8 @@
                var previous = fmp4;
                fmp4 = null;
                diag.fmp4 = null;
+               fmp4Diag = null;
+               diag.fmp4Diag = null;
                if (previous) {
                   try { previous.destroy(); } catch (e) {}
                }
@@ -965,6 +1115,8 @@
                fmp4Url = url;
                fmp4Retries = 0;
                fmp4EverPlayed = false;
+               fmp4Diag = diagOn ? newFmp4Diag() : null;
+               diag.fmp4Diag = fmp4Diag;
                // Một kết nối duy nhất, và nó được DÙNG LUÔN để phát — không thăm dò rồi nối lại.
                // Chỉ nối lại khi luồng đã đứt (xem `recoverFmp4`).
                connectFmp4();
@@ -1068,6 +1220,10 @@
                }
                var delay = delays[fmp4Retries++];
                log("⚠️ " + reason + " ⇒ nối lại lần " + fmp4Retries + " sau " + delay + "ms");
+               if (fmp4Diag) {
+                  fmp4Diag.reconnects++;
+                  reportFmp4Diag("🔌 " + reason + " ⇒ nối lại lần " + fmp4Retries + " sau " + delay + "ms");
+               }
                // Player vừa bị huỷ ⇒ màn hình đen tới khi nối lại xong; watcher ẩn vòng chờ khi có hình.
                showLoading();
                fmp4RetryTimer = setTimeout(function () {
@@ -1131,6 +1287,7 @@
 
                   var ticket = ++loadSeq;
                   var url = request.media.contentId || "";
+                  if (/[?&]diag=1(?:[&#]|$)/.test(url)) enableDiag();
                   var ct = (request.media.contentType || "").toLowerCase();
                   log("LOAD ⇒ " + url + "  type=" + ct +
                       "  (+" + (Date.now() - T_BOOT) + "ms từ lúc receiver chạy)");
@@ -1152,68 +1309,82 @@
                },
             );
 
-            /* Số liệu cập nhật liên tục — chỉ dựng khi bật overlay, để bản phát hành không giữ
+            /* Số liệu cập nhật liên tục — chỉ dựng khi bật chẩn đoán, để bản phát hành không giữ
                một interval chạy mãi chẳng làm gì. Khối này CHỈ ĐỌC, không đụng vào playback. */
-            if (CONFIG_DIAG.DEBUG_OVERLAY) setInterval(function () {
-               try {
-                  var v = video;
-                  var buf = v.buffered;
-                  var bufStr = "—", lagStr = "—";
-                  if (buf.length > 0) {
-                     var end = buf.end(buf.length - 1);
-                     bufStr = (end - buf.start(0)).toFixed(2) + "s";
-                     lagStr = (end - v.currentTime).toFixed(2) + "s";
-                     // gom lag để đọc được xu hướng, không phải một mẫu nhiễu
-                     var lagNow = end - v.currentTime;
-                     if (isFinite(lagNow) && lagNow >= 0 && !v.paused) {
-                        lagHist.push(lagNow);
-                        if (lagHist.length > 40) lagHist.shift(); // ~20s ở nhịp 500ms
+            function startDiagOverlay() {
+               if (diagOverlayStarted) return;
+               diagOverlayStarted = true;
+               setInterval(function () {
+                  try {
+                     var v = video;
+                     var buf = v.buffered;
+                     var bufStr = "—", lagStr = "—";
+                     if (buf.length > 0) {
+                        var end = buf.end(buf.length - 1);
+                        bufStr = (end - buf.start(0)).toFixed(2) + "s";
+                        lagStr = (end - v.currentTime).toFixed(2) + "s";
+                        // gom lag để đọc được xu hướng, không phải một mẫu nhiễu
+                        var lagNow = end - v.currentTime;
+                        if (isFinite(lagNow) && lagNow >= 0 && !v.paused) {
+                           lagHist.push(lagNow);
+                           if (lagHist.length > 40) lagHist.shift(); // ~20s ở nhịp 500ms
+                        }
+                     }
+                     var lagAvg = "—", lagMin = "—", lagMax = "—";
+                     if (lagHist.length > 3) {
+                        var sum = 0, mn = 1e9, mx = -1e9;
+                        for (var i = 0; i < lagHist.length; i++) {
+                           sum += lagHist[i];
+                           if (lagHist[i] < mn) mn = lagHist[i];
+                           if (lagHist[i] > mx) mx = lagHist[i];
+                        }
+                        lagAvg = (sum / lagHist.length).toFixed(2) + "s";
+                        lagMin = mn.toFixed(2); lagMax = mx.toFixed(2);
+                     }
+                     var f = diag.fmp4;
+                     statsEl.textContent =
+                        "mode       " + diag.mode + "\n" +
+                        "branch     " + (activeBranch || "—") + "\n" +
+                        "LAG(live)  " + lagStr + (v.playbackRate !== 1 ? "  ⏩đuổi" : "") + "\n" +
+                        "lag avg    " + lagAvg + "  (" + lagMin + "–" + lagMax + ")\n" +
+                        "buffer     " + bufStr + "\n" +
+                        "curTime    " + v.currentTime.toFixed(2) + "\n" +
+                        "rate       " + v.playbackRate + "\n" +
+                        "readyState " + v.readyState + "\n" +
+                        "paused     " + v.paused + "\n" +
+                        "bytes in   " + (f ? (f.bytesIn / 1024).toFixed(0) + " KB" : "—") + "\n" +
+                        "appends    " + (f ? f.appends : "—") + "\n" +
+                        "queue      " + (f ? f.queue.length : "—") +
+                        (diag.fmp4Diag
+                           ? "\nkhựng      " + diag.fmp4Diag.stalls + " lần, " + diag.fmp4Diag.stallMs +
+                             "ms (dài nhất " + diag.fmp4Diag.maxStallMs + "ms)\n" +
+                             "waiting    " + diag.fmp4Diag.waiting + "\n" +
+                             "đổi tốc độ " + diag.fmp4Diag.rateChanges + ", nhảy " + diag.fmp4Diag.seeks +
+                             ", nối lại " + diag.fmp4Diag.reconnects
+                           : "");
+                  } catch (e) {
+                     // `catch` rỗng ở đây từng giấu một ReferenceError làm CẢ khối số liệu chết im lặng
+                     // (overlay trống mà không ai biết vì sao). Báo đúng một lần là đủ để không lặp lại.
+                     if (!statsErrShown) {
+                        statsErrShown = true;
+                        log("🔴 khối số liệu lỗi: " + e);
                      }
                   }
-                  var lagAvg = "—", lagMin = "—", lagMax = "—";
-                  if (lagHist.length > 3) {
-                     var sum = 0, mn = 1e9, mx = -1e9;
-                     for (var i = 0; i < lagHist.length; i++) {
-                        sum += lagHist[i];
-                        if (lagHist[i] < mn) mn = lagHist[i];
-                        if (lagHist[i] > mx) mx = lagHist[i];
-                     }
-                     lagAvg = (sum / lagHist.length).toFixed(2) + "s";
-                     lagMin = mn.toFixed(2); lagMax = mx.toFixed(2);
-                  }
-                  var f = diag.fmp4;
-                  statsEl.textContent =
-                     "mode       " + diag.mode + "\n" +
-                     "branch     " + (activeBranch || "—") + "\n" +
-                     "LAG(live)  " + lagStr + (v.playbackRate !== 1 ? "  ⏩đuổi" : "") + "\n" +
-                     "lag avg    " + lagAvg + "  (" + lagMin + "–" + lagMax + ")\n" +
-                     "buffer     " + bufStr + "\n" +
-                     "curTime    " + v.currentTime.toFixed(2) + "\n" +
-                     "rate       " + v.playbackRate + "\n" +
-                     "readyState " + v.readyState + "\n" +
-                     "paused     " + v.paused + "\n" +
-                     "bytes in   " + (f ? (f.bytesIn / 1024).toFixed(0) + " KB" : "—") + "\n" +
-                     "appends    " + (f ? f.appends : "—") + "\n" +
-                     "queue      " + (f ? f.queue.length : "—");
-               } catch (e) {
-                  // `catch` rỗng ở đây từng giấu một ReferenceError làm CẢ khối số liệu chết im lặng
-                  // (overlay trống mà không ai biết vì sao). Báo đúng một lần là đủ để không lặp lại.
-                  if (!statsErrShown) {
-                     statsErrShown = true;
-                     log("🔴 khối số liệu lỗi: " + e);
-                  }
-               }
-            }, 500);
+               }, 500);
 
-            // Hai lắng nghe này chỉ để ghi log — bản phát hành không đăng ký.
-            if (CONFIG_DIAG.DEBUG_OVERLAY) {
+               // Các lắng nghe dưới chỉ để ghi log/đếm — bản phát hành không đăng ký.
                window.addEventListener("error", function (e) {
                   log("🔴 JS ERROR: " + (e.message || e) + " @" + (e.lineno || "?"));
                });
                window.addEventListener("unhandledrejection", function (e) {
                   log("🔴 PROMISE REJECT: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
                });
+               // `waiting` = trình duyệt tự báo hết dữ liệu để phát — đối chiếu với số khựng tự đo.
+               video.addEventListener("waiting", function () {
+                  if (activeBranch === "fmp4" && fmp4Diag) { fmp4Diag.waiting++; fmp4Diag.win.waiting++; }
+               });
             }
+            if (diagOn) startDiagOverlay();
 
             log("receiver khởi động — bản " + RECEIVER_VERSION);
             // `skipPlayersLoad`: CAF mặc định tự nạp Shaka (769 KB) + MPL (225 KB) lúc khởi động mà
