@@ -4,26 +4,15 @@
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>CastDuo</title>
-      <!--
-         CAF SDK (365 KB JS) CHỈ preload ở đây; thẻ <script> thật nằm cuối <body>, ngay trước script
-         của receiver. Đặt đồng bộ trong <head> như bản cũ thì trang không vẽ được gì cho tới khi
-         SDK tải + chạy xong — TV đen thêm chừng ấy giây sau khi đã chuyển sang receiver này.
-      -->
+      <!-- CAF SDK chỉ preload ở đây, thẻ nạp thật ở cuối body: nạp đồng bộ trong head là TV đen thêm đúng
+           thời gian tải SDK. -->
       <link
          rel="preload"
          as="script"
          href="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"
       />
-      <!--
-         mpegts.js (267 KB) — `defer` là có chủ ý, KHÔNG phải tối ưu vặt.
-
-         · Đồng bộ như bản cũ ⇒ receiver không chạy nổi một dòng nào cho tới khi tải xong, kể cả
-           khi luồng là fMP4 và thư viện này không bao giờ được đụng tới. TV chậm mạng là CẢ hai
-           nhánh cùng chết.
-         · Nạp lúc LOAD (bản 23/09) ⇒ nhánh MPEG-TS phụ thuộc CDN đúng khoảnh khắc người dùng cast.
-         · `defer` ⇒ tải song song từ lúc receiver khởi động, xong từ lâu trước khi LOAD tới (LOAD
-           chỉ đến sau khi phiên Cast lập xong), mà không chắn khung hình đầu của fMP4.
-      -->
+      <!-- mpegts.js `defer` có chủ ý: đồng bộ thì cả nhánh fMP4 cũng chờ nó; nạp lúc LOAD thì nhánh TS phụ
+           thuộc CDN đúng lúc cast. `defer` tải song song, xong trước khi LOAD tới. -->
       <script
          id="mpegtsLib"
          defer
@@ -47,10 +36,8 @@
             width: 100%;
             height: 100%;
          }
-         /* Nền của chính thẻ <img>: bản 48×27 (1 KB) của ảnh Congrats, phóng to thành bản mờ. Hiện
-            ngay khi HTML về — ảnh thật nằm trên Firebase Storage, không cache, mất 1,6–2,7s, và
-            trong lúc đó màn hình từng đen. Đặt trên thẻ <img> chứ không trên <body>: <body> phải
-            giữ đen cho dải letterbox khi video đang phát. */
+         /* Nền tạm: bản 48×27 của ảnh Congrats, hiện ngay khi HTML về (ảnh thật trên Firebase mất 1,6–2,7s).
+            Đặt trên <img> chứ không trên <body>: <body> phải đen cho dải letterbox. */
          #bgImage {
             object-fit: cover;
             z-index: 1;
@@ -66,9 +53,8 @@
             z-index: 2;
             background: transparent;
          }
-         /* Vòng chờ từ lúc receiver mở tới khung hình đầu. Phải nằm TRÊN <video>: thẻ đó vẽ đen ngay
-            khi đã gắn nguồn mà chưa có khung, che mất ảnh nền. `display: none` khi ẩn để animation
-            không chạy ngầm dưới video suốt phiên mirror trên TV yếu. */
+         /* Vòng chờ tới khung hình đầu — nằm TRÊN <video> (thẻ đó vẽ đen khi chưa có khung). Ẩn bằng
+            `display: none` để animation không chạy ngầm suốt phiên trên TV yếu. */
          #loading {
             display: none;
             position: absolute;
@@ -113,8 +99,7 @@
                opacity: 1;
             }
          }
-         /* Thông báo lỗi cuối cùng — KHÔNG phụ thuộc cờ overlay. Không có nó thì mọi hỏng hóc
-            của receiver đều hiện ra y hệt nhau: một màn hình đen câm. */
+         /* Lỗi cuối cùng — không phụ thuộc overlay; thiếu nó mọi hỏng hóc đều là màn đen câm. */
          #fatal {
             position: absolute;
             left: 0;
@@ -174,55 +159,33 @@
          alt="EcoMirror Background"
       />
       <video id="tvPlayer" playsinline></video>
-      <!-- Bật sẵn: receiver này chỉ được mở khi bấm Start mirror (CastService định tuyến mọi URL
-           `stream.ts` sang App ID của nó), nên từ lúc trang hiện đã là "đang chờ hình". -->
+      <!-- Bật sẵn: receiver này chỉ mở khi bấm Start mirror. -->
       <div id="loading" class="show" aria-hidden="true"><div class="ring"></div></div>
       <div id="fatal" class="hideDebug"></div>
       <div id="stats"></div>
       <div id="debug"></div>
 
-      <!-- Phải đứng NGAY TRƯỚC script receiver: script đó dùng `cast` ở dòng đầu. Đã preload ở <head>. -->
+      <!-- Phải đứng ngay trước script receiver (dùng `cast` ở dòng đầu). -->
       <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
       <script>
          (function () {
             "use strict";
 
-            /* ═══════════════════════════════════════════════════════════════════════════════
-             * CastDuo receiver — HAI nhánh phát ĐỘC LẬP trên cùng endpoint `/stream.ts`:
+            /* CastDuo receiver — HAI nhánh độc lập trên cùng `/stream.ts`, chọn theo `contentType` của LOAD:
+             * MPEG-TS (video/MP2T) → mpegts.js (NHÁNH A); fMP4 (video/mp4) → MSE native (NHÁNH B).
              *
-             *   · MPEG-TS (video/MP2T) → mpegts.js.  NHÁNH A, nguyên văn bản đã chạy ổn định.
-             *   · fMP4    (video/mp4)  → MSE native. NHÁNH B, chỉ chạy khi app bật cờ
-             *                            `MpegTsDirectMirroringEco.USE_FMP4_FOR_CHROMECAST`.
-             *
-             * 🔴 LUẬT CỦA FILE NÀY — đọc trước khi sửa bất cứ dòng nào:
-             *
-             *    Hai nhánh KHÔNG dùng chung một biến điều khiển nào. Mọi hằng số, mọi
-             *    `setInterval`, mọi hàm dọn đều nằm trong nhánh của nó. Thứ duy nhất dùng chung là
-             *    thẻ `<video>`, ảnh nền, vòng chờ `#loading`, và `activeBranch` (cho biết nhánh nào
-             *    đang chạy).
-             *
-             *    Luật này sinh ra từ một ca thật: bản 23/09/2026 gộp hai nhánh vào chung một bộ
-             *    điều khiển phát, với ngưỡng đuổi live đặt theo fragment fMP4 ~66ms. MPEG-TS có
-             *    đơn vị nhỏ nhất ra dây là GOP **1000ms** — lớn hơn MỌI ngưỡng — nên vòng 500ms
-             *    gán `currentTime` liên tục và luồng TS chết hẳn. Một dòng viết cho nhánh này
-             *    KHÔNG được phép với tới nhánh kia.
-             *
-             * Định dạng nhận ra từ `request.media.contentType` của lệnh LOAD — app khai đúng thứ
-             * nó sắp bắn (xem `CastWebService.playMedia`). KHÔNG thăm dò bằng HTTP: mỗi request
-             * vào `TsHttpServer` đều `buffer.clear()`, nên một kết nối thừa là một lần xoá buffer
-             * thừa và hai client chia byte của nhau.
-             * ═══════════════════════════════════════════════════════════════════════════════ */
+             * 🔴 Hai nhánh KHÔNG dùng chung biến điều khiển nào (hằng số, setInterval, hàm dọn); chỉ chung thẻ
+             * <video>, ảnh nền, `#loading`, `activeBranch`. Bản 23/09/2026 gộp chung bộ điều khiển phát ⇒ ngưỡng
+             * theo fragment fMP4 ~66ms áp lên TS (đơn vị GOP 1000ms) ⇒ gán `currentTime` liên tục, TS chết hẳn.
+             * Không thăm dò định dạng bằng HTTP: mỗi request vào `TsHttpServer` là một lần `buffer.clear()`. */
 
-            var RECEIVER_VERSION = "2026-10-05d";
-            // Mốc đo thời gian tới khung hình đầu — thứ quyết định cảm giác "cast lâu lên hình".
-            // Khác hẳn `lag` (độ trễ khi đã chạy) và phải đo riêng.
-            var T_BOOT = Date.now();
+            var RECEIVER_VERSION = "2026-10-06a";
+            var T_BOOT = Date.now(); // mốc đo thời gian tới khung hình đầu (log)
 
             /* ══════════════════════ Dùng chung — TỐI THIỂU ══════════════════════ */
 
             var CONFIG_DIAG = {
-               // Overlay chẩn đoán (số liệu + log). TẮT ở bản phát hành; bật lại khi cần truy lỗi
-               // trên TV — khi không có adb thì nó là thứ duy nhất nhìn được vào receiver.
+               // Overlay chẩn đoán — TẮT ở bản phát hành; bật theo lượt bằng `?diag=1` (setDiagForLoad).
                DEBUG_OVERLAY: false,
             };
 
@@ -233,9 +196,8 @@
             var statsEl = document.getElementById("stats");
             var debugEl = document.getElementById("debug");
 
-            // Spinner bật sẵn từ markup. Không LOAD mirror nào tới (sender hỏng, CAF không nạp được)
-            // thì tắt sau hạn này để khỏi xoay mãi. Đặt TRƯỚC dòng `return` dưới vì đúng ca CAF hỏng
-            // là ca cần nó; `!loadSeq` đúng cả khi `return` sớm làm `loadSeq` chưa được gán.
+            // Không LOAD nào tới (sender / CAF hỏng) thì tắt spinner sau hạn này. Đặt TRƯỚC `return` dưới:
+            // ca CAF hỏng chính là ca cần nó.
             var BOOT_LOADING_MAX_MS = 15000;
             setTimeout(function () { if (!loadSeq) hideLoading(); }, BOOT_LOADING_MAX_MS);
 
@@ -247,13 +209,11 @@
             /** "ts" | "fmp4" | null — biến DUY NHẤT mà cả hai nhánh cùng đụng tới. */
             var activeBranch = null;
 
-            /** Vé của lượt LOAD. `activeBranch` một mình không đủ: hai lệnh LOAD **cùng là TS**
-             *  nối nhau trong lúc mpegts.js còn đang tải sẽ cùng thấy `activeBranch === "ts"`, và
-             *  lượt chờ của lệnh cũ dựng player cho URL đã bị thay. Vé thì không nhầm được. */
+            /** Vé của lượt LOAD: hai LOAD cùng TS nối nhau lúc mpegts.js còn tải thì lượt chờ cũ không được
+             *  dựng player cho URL đã bị thay — `activeBranch` một mình không phân biệt được. */
             var loadSeq = 0;
 
-            /** Gương chẩn đoán MỘT CHIỀU: nhánh ghi vào, chỉ overlay đọc. Không dòng điều khiển
-             *  nào được phép đọc `diag` — nếu cần đọc thì nó là trạng thái, phải nằm trong nhánh. */
+            /** Gương chẩn đoán MỘT CHIỀU: nhánh ghi, chỉ overlay đọc — không dòng điều khiển nào đọc `diag`. */
             var diag = { mode: "—", fmp4: null };
 
             var logLines = [];
@@ -261,8 +221,7 @@
             var statsErrShown = false;
             var lagHist = [];
 
-            /** Chẩn đoán đang bật: cờ build `DEBUG_OVERLAY`, HOẶC lệnh LOAD của bản app debug mang
-             *  `?diag=1` (xem `enableDiag`). Bản app phát hành không gửi cờ ⇒ receiver chạy y như cũ. */
+            /** Chẩn đoán bật: cờ `DEBUG_OVERLAY`, hoặc LOAD mang `?diag=1` (`enableDiag`). */
             var diagOn = CONFIG_DIAG.DEBUG_OVERLAY;
             var diagOverlayStarted = false;
 
@@ -280,7 +239,7 @@
                );
             }
 
-            /** Nhật ký chẩn đoán — KHÔNG làm gì ở bản phát hành. Bật `DEBUG_OVERLAY` khi cần truy lỗi. */
+            /** Nhật ký chẩn đoán — không làm gì khi chẩn đoán tắt. */
             function log(msg) {
                if (!diagOn) return;
                try {
@@ -291,8 +250,7 @@
                } catch (e) {}
             }
 
-            /** Bật chẩn đoán theo từng LOAD — `?diag=1` (chỉ bản app debug gửi). Chỉ đo và hiển thị, không đổi
-             *  cách phát. Lượt LOAD sau không có cờ (bản phát hành cast vào cùng TV) thì tắt lại. */
+            /** Chẩn đoán theo LOAD (`?diag=1`); LOAD sau không có cờ thì tắt lại. Chỉ đo, không đổi cách phát. */
             var diagByLoad = false;
 
             function setDiagForLoad(on) {
@@ -371,13 +329,9 @@
             });
             window.addEventListener("beforeunload", stopAll);
 
-            /* ═════════════ NHÁNH A — MPEG-TS (nguyên văn bản đã chạy ổn định) ═════════════
-             *
-             * Nhánh này KHÔNG có watcher, KHÔNG seek, KHÔNG thăm dò. Việc đuổi live giao trọn cho
-             * `liveSync*` của mpegts.js — một cơ chế, không phải hai. Mọi tham số dưới đây là
-             * nguyên văn bản ổn định; đổi một giá trị là rời khỏi thứ đã được kiểm chứng trên TV
-             * thật, nên đừng đổi mà không đo lại.
-             */
+            /* ═════════════ NHÁNH A — MPEG-TS ═════════════
+             * Không watcher, không seek: đuổi live giao trọn cho `liveSync*` của mpegts.js. Tham số là bản đã
+             * kiểm chứng trên TV — đổi thì phải đo lại. */
 
             var tsPlayer = null;
             var tsLiveEdgeOffset = 0.3;
@@ -402,10 +356,7 @@
                for (var i = 0; i < waiters.length; i++) waiters[i](state === "ready");
             }
 
-            /**
-             * Hàng rào quanh thẻ `<script defer>`: thư viện gần như luôn sẵn sàng trước khi LOAD
-             * tới, nên đây chỉ là lưới an toàn. Mã tạo player bên dưới KHÔNG đổi một tham số nào.
-             */
+            /** Lưới an toàn quanh thẻ `defer`: thư viện gần như luôn sẵn sàng trước khi LOAD tới. */
             function whenMpegtsReady(onDone) {
                if (mpegtsState) { onDone(mpegtsState === "ready"); return; }
                mpegtsWaiters.push(onDone);
@@ -520,31 +471,14 @@
                }
             }
 
-            /* ══════════════════ NHÁNH B — fMP4 (MSE native) ══════════════════
-             *
-             * Toàn bộ hằng số, watcher và trạng thái của nhánh này nằm gọn trong khối dưới đây.
-             * Không một dòng nào ở đây được nhánh MPEG-TS gọi tới, và ngược lại.
-             */
+            /* ══════════════════ NHÁNH B — fMP4 (MSE native) ══════════════════ */
 
             var FMP4_CONFIG = {
-               // 🔴 05/10/2026 — ĐỆM TỰ THÍCH NGHI: thôi đánh nhau với trình phát tiếng của Chrome.
-               //
-               // Chrome chỉ phát khi hàng đợi TIẾNG đã giải mã ≥ một ngưỡng (khởi điểm 200ms); mỗi lần
-               // hụt — kể cả hụt một phần — ngưỡng NHÂN ĐÔI tới 3s, chỉ về 200ms khi seek
-               // (`AudioRendererAlgorithm::IncreasePlaybackThreshold` / `FlushBuffers` của Chromium). Bản
-               // 24/09 nhắm đệm 0,3s rồi đuổi ×1,15/×1,25 kéo đệm xuống: hụt ⇒ Chrome dừng hình chờ ngưỡng
-               // gấp đôi ⇒ lag vọt ⇒ đuổi rút đệm ⇒ hụt tiếp, dừng lâu hơn ⇒ lag > 1,5s ⇒ nhảy cóc ⇒ lặp.
-               // Đo trên TV 05/10: đường truyền êm hoàn toàn mà vẫn ~6 lần đổi tốc độ / 10s, nhảy ~mỗi 17s.
-               //
-               // Nay: hình ĐỨNG (currentTime không chạy — KHÔNG đòi đệm cạn, Chrome dừng khi `buffered` còn
-               // 0,1–0,3s) ⇒ nâng `đích` lên mức đệm Chrome vừa đòi, xoá cửa sổ lag (⇒ ≥ nửa cửa sổ không đổi
-               // tốc độ: tốc độ ≠ 1 lúc Chrome vừa hụt là hụt tiếp);
-               // mạng yên thì hạ dần. Tốc độ quyết theo ĐÁY và ĐỈNH của lag trong 8s, không theo một mẫu: đuổi
-               // khi cả đáy vẫn dư, bồi khi cả đỉnh vẫn thiếu. Cú xóc thoáng qua chỉ hạ đáy (đỉnh vẫn đủ) ⇒
-               // nằm giữa hai ngưỡng ⇒ không đổi gì. Cửa sổ phải DÀI HƠN chu kỳ xóc: 4s với xóc mỗi 5s thì đáy
-               // "dư" giữa hai cú ⇒ bật ×1,05 rồi tắt mỗi chu kỳ (mô phỏng: 34 lần/2 phút).
-               //
-               // Chỉ đúng cho fMP4 (fragment ~100–133ms); đổi `fragmentMinUs` phía app thì xem lại.
+               // 🔴 Đệm tự thích nghi (05/10/2026; số đo + lý do: `direct/AGENT.MD`, "Giật nhịp ngắn"). Chrome chỉ
+               // phát khi hàng đợi TIẾNG ≥ ngưỡng (200ms; hụt là NHÂN ĐÔI tới 3s, chỉ về 200ms khi seek) ⇒ đuổi
+               // mạnh rút đệm là hụt, dừng lâu hơn, nhảy, lặp. Nên: đứng hình (currentTime không chạy — Chrome
+               // dừng khi `buffered` còn 0,1–0,3s) ⇒ nâng `đích`; mạng yên ⇒ hạ dần. Tốc độ theo ĐÁY/ĐỈNH lag
+               // trong 8s (dài hơn chu kỳ xóc), không theo một mẫu. Chỉ đúng cho fragment ~100–133ms.
                targetBaseSec: 0.4,      // đích khởi điểm và sàn (05/10: người dùng chọn ưu tiên trễ thấp)
                targetMaxSec: 1.2,       // trần đích
                startExtraSec: 0.1,      // mở ở lag = đích + ~một fragment ⇒ đáy răng cưa nằm đúng đích
@@ -571,27 +505,20 @@
                refillRate: 0.97,        // đường FFmpeg vẫn hụt dòng thời gian dần (số khung × 33,3ms) ⇒ còn cần bồi
                hardSeekOverSec: 1.5,    // đáy lag > đích + ngần này mới nhảy: seek = giải mã lại từ IDR, tự nó là giật
                selfSeekIgnoreMs: 1000,  // sau seek của chính receiver: đứng là do seek, không nâng đích
-               // Nhảy bắt kịp: mất mạng ⇒ đứng ⇒ phần dồn ở điện thoại xả sang TRONG VÀI GIÂY SAU khi hình chạy lại
-               // ⇒ lag 2,5–4,8s kéo dài ~20s nếu chỉ đuổi ×1,05/×1,1 (log TV 05/10). Sau mỗi lần đứng, trong
-               // `catchUpWindowMs`: lag dư > đích + `catchUpOverSec` VÀ đã thôi tăng (xả xong) ⇒ nhảy về đích. Nhịp
-               // giải mã ~0,2s của cú nhảy gộp vào chính lần đứng vừa rồi; nhảy khi còn đang xả là phải nhảy lại.
+               // Nhảy bắt kịp sau đứng hình: phần dồn ở điện thoại xả sang vài giây SAU khi hình chạy lại ⇒ chờ lag
+               // thôi tăng rồi mới nhảy. 🔴 Cú nhảy là một lần giật RIÊNG (giải mã lại từ IDR) ⇒ chỉ nhảy khi dư
+               // > 2s, dư ít để vòng đuổi kéo dần (05d nhảy từ 0,5s: giật nhiều hơn — `direct/AGENT.MD`).
                catchUpWindowMs: 8000,
-               catchUpOverSec: 0.5,
+               catchUpOverSec: 2.0,
                catchUpStableSec: 0.15,  // lag tăng < ngần này trong 1s gần nhất = đã xả xong
-               rescueAfterMs: 1000,     // đứng ≥ ngần này mà đệm vẫn có ⇒ seek về `end − đích`. Seek xả hàng đợi
-                                        // của Chrome (ngưỡng về 200ms) nên hình chạy lại ngay; cũng là lối thoát
-                                        // duy nhất khi đứng vì khe trong `buffered` / decoder kẹt — chờ là đứng mãi
+               rescueAfterMs: 1000,     // đứng ≥ ngần này mà đệm vẫn có ⇒ seek về `end − đích` (xả hàng đợi tiếng của
+                                        // Chrome); lối thoát duy nhất khi kẹt ở khe / decoder — chờ là đứng mãi
                maxBackBufferSec: 3,   // giữ tối đa bao nhiêu giây phía sau currentTime
-               trimBatchSec: 2,       // dọn back buffer THEO LÔ ≥2s: mỗi `remove()` chặn lượt append
-                                      // kế tiếp tới khi xong, dọn 0,5s một lần là ~2 lần/giây tắc
-                                      // nhỏ trên TV yếu
+               trimBatchSec: 2,       // dọn THEO LÔ: mỗi `remove()` chặn lượt append kế — dọn vụn là tắc nhỏ liên tục
                trimEveryAppends: 10,  // xét dọn mỗi 10 lần append (~1 giây), không phải mỗi lần
                emptyAppendsFatal: 12, // ~1,2 giây byte về mà không giải mã được gì ⇒ báo lỗi
-               // 🔴 01/10/2026 — luồng đứt thì NỐI LẠI thay vì chết hẳn phiên. App (`TsHttpServer`,
-               // `FMP4_RECONNECT_GRACE_MS` = 5s) giữ phiên sau khi TV rớt kết nối; GET mới tự `clear()`
-               // + phát lại init + xin IDR. Tổng các lượt chờ (3,5s) PHẢI gọn trong ân hạn đó.
-               // "Đứt" = LỖI (reader/fetch lỗi, HTTP ≠ 2xx, lỗi <video>). Luồng KẾT THÚC GỌN (`done`) là
-               // điện thoại chủ động dừng — xem `endFmp4FromPhone`.
+               // Luồng đứt (LỖI) thì nối lại; tổng các lượt chờ (3,5s) PHẢI gọn trong ân hạn 5s của app
+               // (`FMP4_RECONNECT_GRACE_MS`). Kết thúc GỌN (`done`) là điện thoại dừng — `endFmp4FromPhone`.
                reconnectDelaysMs: [500, 1000, 2000],
                reconnectHealthyMs: 10000, // chạy khoẻ ngần này thì sự cố sau là chuỗi mới, đếm lại từ 0
                connectTimeoutMs: 3000,    // fetch chưa có header sau ngần này ⇒ coi như hỏng
@@ -599,19 +526,15 @@
 
             var fmp4 = null;
             var fmp4ReadyTimer = null;
-            var fmp4ChaseTimer = null;
+            var fmp4PaceTimer = null;
             var fmp4Url = null;
             var fmp4Retries = 0;          // số lượt nối lại liên tiếp đã dùng
             var fmp4RetryTimer = null;
             var fmp4ConnSeq = 0;          // vé của lượt kết nối: callback của lượt cũ tự bỏ
             var fmp4EverPlayed = false;   // lượt LOAD này đã từng có hình — chỉ để chọn câu báo lỗi
 
-            /* ── Đo khựng hình — CHỈ khi `diagOn` (2026-10-05) ───────────────────────────────────
-             *
-             * Chỉ ĐO, không điều khiển: không dòng điều khiển nào đọc `fmp4Diag`. Mỗi ~10 giây và mỗi
-             * lần khựng, một dòng tóm tắt được gửi về điện thoại (`/diag` của `TsHttpServer`, bản debug)
-             * để nằm cùng file logcat với dòng `nhịp` — đối chiếu được phía điện thoại lúc TV khựng.
-             */
+            /* ── Đo khựng hình — CHỈ khi `diagOn`. Chỉ ĐO (không dòng điều khiển nào đọc `fmp4Diag`); mỗi 10s và
+             * mỗi lần khựng gửi một dòng về `/diag` của điện thoại, nằm cùng logcat với dòng `nhịp`. ── */
             var fmp4Diag = null;        // số đo của lượt LOAD này (qua cả các lần nối lại)
             var FMP4_DIAG = { reportEveryMs: 10000 };
 
@@ -713,14 +636,8 @@
                return { size: size, type: type, headerSize: headerSize };
             }
 
-            /**
-             * Dựng codec string từ init segment.
-             *
-             * 🔴 Vì sao phải parse thay vì hardcode: `EcoVideoEncoder` KHÔNG đặt `KEY_PROFILE`
-             * (xem direct_v3/AGENT.MD) nên profile do encoder của **từng máy Android** tự chọn —
-             * Baseline trên máy này, High trên máy khác. Khai sai profile với MSE là
-             * `addSourceBuffer` ném NotSupportedError và màn hình đen không lý do.
-             */
+            /** Codec string từ init segment — phải parse: profile tuỳ encoder từng máy, khai sai là
+             *  `addSourceBuffer` ném và màn đen. */
             function codecStringFromInit(buf) {
                var codecs = [];
                try {
@@ -834,17 +751,8 @@
                } catch (e) {}
             };
 
-            /**
-             * Canh ca "byte về đều mà không giải mã được gì" — CHỈ cho tới khi thấy dữ liệu đầu tiên.
-             *
-             * 🔴 Ca đã cắn hai lần (22/09: moof đơn-track; 24/09: intra refresh làm mất IDR): byte về
-             * đều, `appendBuffer` KHÔNG ném lỗi nào, nhưng `buffered` rỗng vĩnh viễn — màn hình đen
-             * không dấu vết. Không tầng nào báo lỗi ⇒ phải tự hỏi.
-             *
-             * Bản trước hỏi ở MỌI lần append suốt cả phiên. Nay thấy dữ liệu một lần là thôi. Và nếu
-             * đã báo lỗi mà sau đó dữ liệu về (IDR tới muộn), gỡ dòng báo lỗi — trước đây nó dính
-             * trên màn hình cả khi hình đã chạy bình thường.
-             */
+            /** Canh "byte về đều mà không giải mã được gì" (22/09 moof đơn-track, 24/09 mất IDR: `buffered` rỗng
+             *  vĩnh viễn, không tầng nào báo lỗi) — chỉ tới khi thấy dữ liệu đầu; về muộn thì gỡ lỗi đã báo. */
             Fmp4Player.prototype.checkFirstData = function () {
                try {
                   if (this.sb.buffered.length > 0) {
@@ -993,7 +901,7 @@
                // 🔴 Bản 23/09 không giữ handle của vòng 500ms nên không bao giờ dừng được nó:
                // cast lần thứ N là N vòng cùng ghi `currentTime`.
                if (fmp4ReadyTimer) { clearInterval(fmp4ReadyTimer); fmp4ReadyTimer = null; }
-               if (fmp4ChaseTimer) { clearInterval(fmp4ChaseTimer); fmp4ChaseTimer = null; }
+               if (fmp4PaceTimer) { clearInterval(fmp4PaceTimer); fmp4PaceTimer = null; }
             }
 
             /** Nhịp phát của MỘT lượt kết nối — MediaSource mới thì ngưỡng tiếng của Chrome cũng về 200ms. */
@@ -1048,7 +956,7 @@
                   }
                }, 100);
 
-               fmp4ChaseTimer = setInterval(function () {
+               fmp4PaceTimer = setInterval(function () {
                   if (activeBranch !== "fmp4") { clearFmp4Watchers(); return; }
                   if (!playStarted || !pace) return;
                   try { fmp4PaceTick(pace); } catch (e) {}
@@ -1350,13 +1258,8 @@
                );
             }
 
-            /**
-             * Luồng đứt (TCP reset, điện thoại đổi mạng, decoder TV báo lỗi giữa chừng): dựng lại kết
-             * nối thay vì chết hẳn phiên. Hết lượt mới báo lỗi và trả màn hình về trạng thái chờ.
-             *
-             * Watcher KHÔNG dọn ở đây: chúng chỉ đọc `video.buffered` (rỗng trong lúc chờ nên tự đứng
-             * yên), và lượt nối thành công gọi lại `startFmp4Watchers()` — chờ đệm rồi `play()` lại.
-             */
+            /** Luồng đứt: dựng lại kết nối thay vì chết phiên; hết lượt mới báo lỗi. Watcher không dọn ở đây —
+             *  chúng đứng yên khi `buffered` rỗng, lượt nối thành công gọi lại `startFmp4Watchers()`. */
             function recoverFmp4(reason) {
                if (activeBranch !== "fmp4") return;
                var player = fmp4;
@@ -1392,19 +1295,9 @@
                }, delay);
             }
 
-            /**
-             * Điện thoại KẾT THÚC GỌN luồng (chunk cuối của HTTP chunked ⇒ reader `done`): về màn chờ,
-             * không báo lỗi, không nối lại.
-             *
-             * 🔴 Bấm Dừng trên điện thoại KHÔNG gửi lệnh STOP nào qua Cast — receiver chỉ biết qua việc
-             * luồng HTTP kết thúc. Coi `done` là "đứt" (bản 2026-10-01a) thì mọi lần dừng bình thường
-             * đều thành: nối lại 3 lần vào cổng đã đóng ⇒ "Mất kết nối tới điện thoại" sau ~3,5s.
-             *
-             * An toàn để không nối lại: phía điện thoại chỉ kết thúc gọn phản hồi khi phiên đã hết (dừng
-             * phiên, 10 giây không có dữ liệu, FFmpeg ngừng, hoặc lượt đọc đã bị kết nối khác thay — mà
-             * kết nối đó receiver đã bỏ). Đứt thật thì không có chunk cuối: Chrome báo LỖI, không `done`.
-             * App đợi chunk cuối gửi xong rồi mới đóng socket (`TsHttpServer.stopServer`).
-             */
+            /** Điện thoại KẾT THÚC GỌN luồng (reader `done`): về màn chờ, không báo lỗi, không nối lại.
+             *  🔴 Bấm Dừng trên điện thoại không gửi STOP qua Cast — receiver chỉ biết qua luồng kết thúc; coi `done`
+             *  là đứt (2026-10-01a) thì mọi lần dừng thành "Mất kết nối" sau ~3,5s. Đứt thật thì Chrome báo LỖI. */
             function endFmp4FromPhone(reason) {
                if (activeBranch !== "fmp4") return;
                log("⏹ " + reason + " — điện thoại đã dừng luồng, về màn chờ");
@@ -1469,8 +1362,7 @@
                },
             );
 
-            /* Số liệu cập nhật liên tục — chỉ dựng khi bật chẩn đoán, để bản phát hành không giữ
-               một interval chạy mãi chẳng làm gì. Khối này CHỈ ĐỌC, không đụng vào playback. */
+            /* Overlay số liệu — chỉ dựng khi bật chẩn đoán; CHỈ ĐỌC, không đụng playback. */
             function startDiagOverlay() {
                if (diagOverlayStarted) return;
                diagOverlayStarted = true;
@@ -1524,8 +1416,7 @@
                              ", nối lại " + diag.fmp4Diag.reconnects
                            : "");
                   } catch (e) {
-                     // `catch` rỗng ở đây từng giấu một ReferenceError làm CẢ khối số liệu chết im lặng
-                     // (overlay trống mà không ai biết vì sao). Báo đúng một lần là đủ để không lặp lại.
+                     // Báo một lần — `catch` rỗng ở đây từng giấu lỗi làm overlay trống không lý do.
                      if (!statsErrShown) {
                         statsErrShown = true;
                         log("🔴 khối số liệu lỗi: " + e);
@@ -1548,10 +1439,8 @@
             if (diagOn) startDiagOverlay();
 
             log("receiver khởi động — bản " + RECEIVER_VERSION);
-            // `skipPlayersLoad`: CAF mặc định tự nạp Shaka (769 KB) + MPL (225 KB) lúc khởi động mà
-            // receiver này không phát bằng chúng — trên TV yếu đó là thêm hàng giây tải + biên dịch JS
-            // trong đúng quãng màn hình đen lúc chuyển app. Đánh đổi: đường "nhường CAF" (mpegts.js không
-            // tải được) không còn trình phát — đường đó vốn đã hiện lỗi trước khi nhường.
+            // `skipPlayersLoad`: không nạp Shaka + MPL (~1 MB) receiver không dùng — đỡ hàng giây màn đen trên TV
+            // yếu. Đánh đổi: đường "nhường CAF" không còn trình phát (đường đó đã hiện lỗi trước khi nhường).
             context.start({ disableIdleTimeout: true, skipPlayersLoad: true });
          })();
       </script>
